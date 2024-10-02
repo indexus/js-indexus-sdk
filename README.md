@@ -1,5 +1,7 @@
 # Indexus SDK
 
+<a href="https://github.com/indexus/go-indexus-core/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"/></a> <a href="https://discord.gg/EXuGtcDgaS"><img src="https://img.shields.io/discord/1235219716738519080?logo=discord&logoColor=white" alt="Discord"/></a>
+
 Welcome to the **Indexus SDK**, a powerful toolkit designed to facilitate the addition and retrieval of items in decentralized, peer-to-peer collections. With Indexus, developers can effortlessly manage data within collections, enabling efficient searches and data retrieval without the need to understand the underlying complexities of the network.
 
 ---
