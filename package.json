@@ -1,6 +1,6 @@
 {
   "name": "js-indexus-sdk",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "A powerful toolkit for decentralized, peer-to-peer networks.",
   "main": "dist/js-indexus-sdk.cjs.js",
   "module": "dist/js-indexus-sdk.esm.js",
