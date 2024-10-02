@@ -1,0 +1,35 @@
+{
+  "name": "indexus-sdk",
+  "version": "1.0.0",
+  "description": "JavaScript SDK for frontend frameworks",
+  "main": "dist/indexus-sdk.cjs.js",
+  "module": "dist/indexus-sdk.esm.js",
+  "browser": "dist/indexus-sdk.umd.js",
+  "types": "dist/types/index.d.ts",
+  "scripts": {
+    "build": "rollup -c",
+    "test": "echo \"No tests specified\" && exit 0",
+    "start": "babel-node main.js"
+  },
+  "peerDependencies": {
+    "axios": "^0.21.1"
+  },
+  "devDependencies": {
+    "@babel/cli": "^7.25.6",
+    "@babel/core": "^7.25.2",
+    "@babel/node": "^7.25.0",
+    "@babel/preset-env": "^7.25.4",
+    "@rollup/plugin-commonjs": "^16.0.0",
+    "@rollup/plugin-node-resolve": "^10.0.0",
+    "axios": "^0.21.1",
+    "rollup": "^2.38.0"
+  },
+  "keywords": [
+    "sdk",
+    "javascript",
+    "frontend"
+  ],
+  "author": "Rémi Henriot",
+  "license": "MIT",
+  "type": "module"
+}
