@@ -1,33 +1,59 @@
-import commonjs from '@rollup/plugin-commonjs';
-import resolve from '@rollup/plugin-node-resolve';
+import commonjs from "@rollup/plugin-commonjs";
+import resolve from "@rollup/plugin-node-resolve";
+import json from "@rollup/plugin-json";
+import polyfillNode from "rollup-plugin-polyfill-node";
 
 export default [
   // ES Module build
   {
-    input: 'src/index.js',
+    input: "src/index.js",
     output: {
-      file: 'dist/indexus-sdk.esm.js',
-      format: 'esm',
+      file: "dist/js-indexus-sdk.esm.js",
+      format: "esm",
     },
-    plugins: [resolve(), commonjs()],
+    plugins: [
+      resolve({
+        browser: true,
+        preferBuiltins: false,
+      }),
+      commonjs(),
+      json(),
+      polyfillNode(),
+    ],
   },
   // CommonJS build
   {
-    input: 'src/index.js',
+    input: "src/index.js",
     output: {
-      file: 'dist/indexus-sdk.cjs.js',
-      format: 'cjs',
+      file: "dist/js-indexus-sdk.cjs.js",
+      format: "cjs",
     },
-    plugins: [resolve(), commonjs()],
+    plugins: [
+      resolve({
+        browser: true,
+        preferBuiltins: false,
+      }),
+      commonjs(),
+      json(),
+      polyfillNode(),
+    ],
   },
   // UMD build for direct browser inclusion
   {
-    input: 'src/index.js',
+    input: "src/index.js",
     output: {
-      file: 'dist/indexus-sdk.umd.js',
-      format: 'umd',
-      name: 'YourSDK', // Replace with a global variable name for UMD
+      file: "dist/js-indexus-sdk.umd.js",
+      format: "umd",
+      name: "IndexusSDK",
     },
-    plugins: [resolve(), commonjs()],
+    plugins: [
+      resolve({
+        browser: true,
+        preferBuiltins: false,
+      }),
+      commonjs(),
+      json(),
+      polyfillNode(),
+    ],
   },
 ];

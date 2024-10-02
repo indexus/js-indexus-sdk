@@ -1,6 +1,5 @@
 import axios from "axios";
 
-import { API } from "./index.js";
 import { Space } from "../entities/space.js";
 import { Peer } from "../network/peer.js";
 

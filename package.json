@@ -1,11 +1,14 @@
 {
-  "name": "indexus-sdk",
-  "version": "1.0.0",
-  "description": "JavaScript SDK for frontend frameworks",
-  "main": "dist/indexus-sdk.cjs.js",
-  "module": "dist/indexus-sdk.esm.js",
-  "browser": "dist/indexus-sdk.umd.js",
-  "types": "dist/types/index.d.ts",
+  "name": "js-indexus-sdk",
+  "version": "1.0.6",
+  "description": "A powerful toolkit for decentralized, peer-to-peer networks.",
+  "main": "dist/js-indexus-sdk.cjs.js",
+  "module": "dist/js-indexus-sdk.esm.js",
+  "browser": "dist/js-indexus-sdk.umd.js",
+  "files": [
+    "dist",              
+    "README.md"
+  ],
   "scripts": {
     "build": "rollup -c",
     "test": "echo \"No tests specified\" && exit 0",
@@ -20,16 +23,18 @@
     "@babel/node": "^7.25.0",
     "@babel/preset-env": "^7.25.4",
     "@rollup/plugin-commonjs": "^16.0.0",
+    "@rollup/plugin-json": "^6.1.0",
     "@rollup/plugin-node-resolve": "^10.0.0",
     "axios": "^0.21.1",
-    "rollup": "^2.38.0"
+    "rollup": "^2.38.0",
+    "rollup-plugin-polyfill-node": "^0.13.0"
   },
   "keywords": [
     "sdk",
     "javascript",
-    "frontend"
+    "p2p",
+    "index"
   ],
   "author": "Rémi Henriot",
-  "license": "MIT",
-  "type": "module"
+  "license": "MIT"
 }
