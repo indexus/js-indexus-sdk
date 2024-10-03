@@ -15,26 +15,7 @@ function encodeUrl64(input) {
     throw new Error("Input must be a string or Uint8Array");
   }
 
-  // Convert bytes to standard Base64
-  let base64String = bytes.toString("base64");
-
-  // Replace '+' with '-', '/' with '_', and remove '=' padding
-  const standard = "+/";
-  const custom = "-_";
-
-  let customBase64 = base64String
-    .split("")
-    .map((char) => {
-      const index = standard.indexOf(char);
-      if (index >= 0) {
-        return custom.charAt(index);
-      }
-      return char;
-    })
-    .join("")
-    .replace(/=+$/, ""); // Remove trailing '='
-
-  return customBase64;
+  return toUrl64(bytes.toString("base64"));
 }
 
 // Decoding function
@@ -62,6 +43,26 @@ function decodeUrl64(encoded) {
   const bytes = Buffer.from(base64String, "base64");
 
   return bytes; // Return Buffer (which is a Uint8Array)
+}
+
+function toUrl64(base64String) {
+  // Replace '+' with '-', '/' with '_', and remove '=' padding
+  const standard = "+/";
+  const custom = "-_";
+
+  let customBase64 = base64String
+    .split("")
+    .map((char) => {
+      const index = standard.indexOf(char);
+      if (index >= 0) {
+        return custom.charAt(index);
+      }
+      return char;
+    })
+    .join("")
+    .replace(/=+$/, ""); // Remove trailing '='
+
+  return customBase64;
 }
 
 function charsToNumbers(str) {
