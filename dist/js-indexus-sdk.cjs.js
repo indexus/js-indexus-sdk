@@ -1391,6 +1391,22 @@ const ROOT = "@";
 const BASEURL64 =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
+// Encoding function
+function encodeUrl64(input) {
+  // Input can be a string or Uint8Array
+  let bytes;
+  if (typeof input === "string") {
+    // Convert string to Uint8Array
+    bytes = Buffer.from(input, "utf-8");
+  } else if (input instanceof Uint8Array || Buffer.isBuffer(input)) {
+    bytes = input;
+  } else {
+    throw new Error("Input must be a string or Uint8Array");
+  }
+
+  return toUrl64(bytes.toString("base64"));
+}
+
 // Decoding function
 function decodeUrl64(encoded) {
   const custom = "-_";
@@ -1416,6 +1432,26 @@ function decodeUrl64(encoded) {
   const bytes = Buffer.from(base64String, "base64");
 
   return bytes; // Return Buffer (which is a Uint8Array)
+}
+
+function toUrl64(base64String) {
+  // Replace '+' with '-', '/' with '_', and remove '=' padding
+  const standard = "+/";
+  const custom = "-_";
+
+  let customBase64 = base64String
+    .split("")
+    .map((char) => {
+      const index = standard.indexOf(char);
+      if (index >= 0) {
+        return custom.charAt(index);
+      }
+      return char;
+    })
+    .join("")
+    .replace(/=+$/, ""); // Remove trailing '='
+
+  return customBase64;
 }
 
 function charsToNumbers(str) {
@@ -4394,7 +4430,7 @@ async function getSet(peer, collection, location) {
     );
 
     // Parse the set data into Element instances
-    const elements = parseSet(data.set, collection);
+    const elements = data.set !== null ? parseSet(data.set, collection) : null;
 
     // Return the structured object
     return {
@@ -4431,3 +4467,5 @@ exports.Peer = Peer;
 exports.Space = Space;
 exports.Spherical = Spherical;
 exports.charsToNumbers = charsToNumbers;
+exports.decodeUrl64 = decodeUrl64;
+exports.encodeUrl64 = encodeUrl64;

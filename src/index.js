@@ -18,4 +18,8 @@ export { Spherical } from "./library/dimensions/spherical.js";
 export { Linear } from "./library/dimensions/linear.js";
 
 // Utilities
-export { charsToNumbers } from "./utilities/encoding.js";
+export {
+  encodeUrl64,
+  decodeUrl64,
+  charsToNumbers,
+} from "./utilities/encoding.js";
