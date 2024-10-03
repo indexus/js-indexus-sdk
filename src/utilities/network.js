@@ -17,3 +17,13 @@ export async function asyncPool(poolLimit, array, iteratorFn) {
 
   return Promise.all(ret);
 }
+
+export function getHostFromIP(ip) {
+  let host;
+  if (ip.includes(":")) {
+    host = `[${ip}]`;
+  } else {
+    host = ip;
+  }
+  return host;
+}
