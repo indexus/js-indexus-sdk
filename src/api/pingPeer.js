@@ -2,6 +2,7 @@ import axios from "axios";
 
 import { Space } from "../entities/space.js";
 import { Peer } from "../network/peer.js";
+import { getHostFromIP } from "../utilities/network.js";
 
 /**
  * Ping
@@ -15,7 +16,7 @@ export async function pingPeer(ip, port) {
   try {
     // Make the POST request to ping the peer
     const response = await axios.post(
-      `http://[${ip}]:${port}/ping`,
+      `http://${getHostFromIP(ip)}:${port}/ping`,
       requestBody,
       {
         headers: {

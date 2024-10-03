@@ -2,6 +2,7 @@ import axios from "axios";
 
 import { Space } from "../entities/space.js";
 import { Peer } from "../network/peer.js";
+import { getHostFromIP } from "../utilities/network.js";
 
 /**
  * Adds an item to a collection.
@@ -27,11 +28,15 @@ export async function addItem(peer, collection, root, location, reference) {
 
   try {
     // Make the POST request to add the item to the collection
-    await axios.post(`http://[${peer.ip()}]:${peer.port()}/item`, requestBody, {
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
+    await axios.post(
+      `http://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
+      requestBody,
+      {
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }
+    );
   } catch (error) {
     // Handle and log errors
     console.error("Error adding item to the collection:", error);

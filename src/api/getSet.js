@@ -4,6 +4,7 @@ import { Element } from "../model/index.js";
 import { Item } from "../entities/item.js";
 import { Set } from "../entities/set.js";
 import { Peer } from "../network/peer.js";
+import { getHostFromIP } from "../utilities/network.js";
 
 /**
  * Retrieves a set from a collection at a specified location.
@@ -15,7 +16,9 @@ import { Peer } from "../network/peer.js";
  */
 export async function getSet(peer, collection, location) {
   // Construct the GET request URL
-  const url = `http://[${peer.ip()}]:${peer.port()}/set?collection=${encodeURIComponent(
+  const url = `http://${getHostFromIP(
+    peer.ip()
+  )}:${peer.port()}/set?collection=${encodeURIComponent(
     collection
   )}&location=${encodeURIComponent(location)}`;
 
