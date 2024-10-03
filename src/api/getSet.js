@@ -71,7 +71,7 @@ export async function getSet(peer, collection, location) {
     );
 
     // Parse the set data into Element instances
-    const elements = parseSet(data.set, collection);
+    const elements = data.set !== null ? parseSet(data.set, collection) : null;
 
     // Return the structured object
     return {
