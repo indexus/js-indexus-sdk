@@ -14,14 +14,6 @@
     at(i, j) {
       return 0;
     }
-
-    /**
-     * Returns a unique signature for the mask.
-     * @returns {string}
-     */
-    signature() {
-      return "";
-    }
   }
 
   class Offset {
@@ -1238,20 +1230,6 @@
       }
       return this.value[length - 1][j];
     }
-
-    /**
-     * Returns a unique signature for the mask.
-     * @returns {string}
-     */
-    signature() {
-      let signature = "cm";
-      for (const subArray of this.value) {
-        for (const num of subArray) {
-          signature += String(num);
-        }
-      }
-      return signature;
-    }
   }
 
   class Static extends Mask {
@@ -1269,31 +1247,9 @@
       }
       this.value = value;
     }
-
-    /**
-     * Retrieves the mask value at the specified indices.
-     * @param {number} i - (Unused in current implementation)
-     * @param {number} j - The index to retrieve.
-     * @returns {number}
-     */
-    at(i, j) {
-      return this.value[j];
-    }
-
-    /**
-     * Returns a unique signature for the mask.
-     * @returns {string}
-     */
-    signature() {
-      let signature = "sm";
-      for (const num of this.value) {
-        signature += String(num);
-      }
-      return signature;
-    }
   }
 
-  class Basic extends Offset {
+  class Basic$1 extends Offset {
     /**
      * Constructs a new Offset instance.
      * @param {number[]} details - An array of integers.
@@ -1317,75 +1273,26 @@
     }
   }
 
-  const DIMENSIONS = {
-    spherical: Spherical,
-    linear: Linear,
-  };
-
-  function mapDimension(name, args) {
-    return new DIMENSIONS[name](args);
-  }
-
-  const MASKS = {
-    capped: Capped,
-    static: Static,
-  };
-
-  function mapMask(name, args) {
-    return new MASKS[name](args);
-  }
-
-  const OFFSETS = {
-    basic: Basic,
-  };
-
-  function mapOffset(name, args) {
-    return new OFFSETS[name](args);
-  }
-
-  class Collection extends Collection$1 {
-    constructor(name, dimensions, mask, offset) {
+  class Basic extends Mask {
+    /**
+     * Constructs a new BasicMask instance.
+     * @param {number[]} value - An array of integers.
+     */
+    constructor(value) {
       super();
 
-      this._name = name;
-      this._dimensions = [];
-      dimensions.forEach((dimension) => {
-        this._dimensions.push(mapDimension(dimension.name, dimension.args));
-      });
-      this._mask = mapMask(mask.name, mask.args);
-      this._offset = mapOffset(offset.name, offset.args);
+      this.value = value;
     }
 
     /**
-     * Returns the name of the collection.
-     * @returns {string}
+     * Retrieves the mask value at the specified indices.
+     * @param {number} i
+     * @param {number} j
+     * @returns {number}
      */
-    name() {
-      return this._name;
-    }
-
-    /**
-     * Returns an array of dimension names associated with the collection.
-     * @returns {Dimension[]}
-     */
-    dimensions() {
-      return this._dimensions;
-    }
-
-    /**
-     * Returns a mask.
-     * @returns {Mask}
-     */
-    mask() {
-      return this._mask;
-    }
-
-    /**
-     * Returns a offset.
-     * @returns {Offset}
-     */
-    offset() {
-      return this._offset;
+    at(i, j) {
+      const idx = (i * 6 + j) % this.value.length;
+      return this.value[idx];
     }
   }
 
@@ -1492,6 +1399,85 @@
       throw new Error(err);
     }
     return id;
+  }
+
+  const DIMENSIONS = {
+    spherical: Spherical,
+    linear: Linear,
+  };
+
+  function mapDimension(name, args) {
+    return new DIMENSIONS[name](args);
+  }
+
+  const MASKS = {
+    basic: Basic,
+    capped: Capped,
+    static: Static,
+  };
+
+  function mapMask(name, args) {
+    return new MASKS[name](args);
+  }
+
+  const OFFSETS = {
+    basic: Basic$1,
+  };
+
+  function mapOffset(name, args) {
+    return new OFFSETS[name](args);
+  }
+
+  class Collection extends Collection$1 {
+    constructor(name, dimensions) {
+      super();
+
+      this._name = name;
+      this._dimensions = [];
+
+      const m = dimensions.reduce((total, dimension) => {
+        const d = mapDimension(dimension.name, dimension.args);
+        this._dimensions.push(d);
+        return total + d.pointLength();
+      }, 0);
+
+      const mask = Array.from({ length: m + 1 }, (_, i) => i);
+
+      this._mask = mapMask("basic", mask);
+      this._offset = mapOffset("basic", [charsToNumbers(name)]);
+    }
+
+    /**
+     * Returns the name of the collection.
+     * @returns {string}
+     */
+    name() {
+      return this._name;
+    }
+
+    /**
+     * Returns an array of dimension names associated with the collection.
+     * @returns {Dimension[]}
+     */
+    dimensions() {
+      return this._dimensions;
+    }
+
+    /**
+     * Returns a mask.
+     * @returns {Mask}
+     */
+    mask() {
+      return this._mask;
+    }
+
+    /**
+     * Returns a offset.
+     * @returns {Offset}
+     */
+    offset() {
+      return this._offset;
+    }
   }
 
   class Space {
@@ -8449,7 +8435,6 @@
   exports.Peer = Peer;
   exports.Space = Space;
   exports.Spherical = Spherical;
-  exports.charsToNumbers = charsToNumbers;
   exports.decodeUrl64 = decodeUrl64;
   exports.encodeUrl64 = encodeUrl64;
 

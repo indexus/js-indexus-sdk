@@ -15,28 +15,6 @@ class Static extends Mask {
     }
     this.value = value;
   }
-
-  /**
-   * Retrieves the mask value at the specified indices.
-   * @param {number} i - (Unused in current implementation)
-   * @param {number} j - The index to retrieve.
-   * @returns {number}
-   */
-  at(i, j) {
-    return this.value[j];
-  }
-
-  /**
-   * Returns a unique signature for the mask.
-   * @returns {string}
-   */
-  signature() {
-    let signature = "sm";
-    for (const num of this.value) {
-      signature += String(num);
-    }
-    return signature;
-  }
 }
 
 export { Static };

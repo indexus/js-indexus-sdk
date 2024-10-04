@@ -8,14 +8,6 @@ class Mask {
   at(i, j) {
     return 0;
   }
-
-  /**
-   * Returns a unique signature for the mask.
-   * @returns {string}
-   */
-  signature() {
-    return "";
-  }
 }
 
 export { Mask };
