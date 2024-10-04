@@ -24,20 +24,6 @@ class Capped extends Mask {
     }
     return this.value[length - 1][j];
   }
-
-  /**
-   * Returns a unique signature for the mask.
-   * @returns {string}
-   */
-  signature() {
-    let signature = "cm";
-    for (const subArray of this.value) {
-      for (const num of subArray) {
-        signature += String(num);
-      }
-    }
-    return signature;
-  }
 }
 
 export { Capped };

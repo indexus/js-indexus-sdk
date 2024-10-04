@@ -8,7 +8,6 @@ import {
   API,
   Spherical,
   Linear,
-  charsToNumbers,
 } from "js-indexus-sdk";
 
 function timeout(ms) {
@@ -19,22 +18,13 @@ async function run() {
   const bootstraps = ["bootstrap.indexus.io|21000"];
 
   // Instantiate collections
-  const name = "R9zIWvyC3RcBy2AIH9jeZIqUywU";
-  const helloworld = new Collection(
-    name,
-    [
-      { name: "spherical", args: [-90, -180, 90, 180] },
-      {
-        name: "linear",
-        args: [-126230400 * 16 * 16 * 8, 126230400 * 16 * 16 * 8],
-      },
-    ],
-    { name: "static", args: [0, 1, 2, 0, 1, 2] },
+  const helloworld = new Collection("R9zIWvyC3RcBy2AIH9jeZIqUywU", [
+    { name: "spherical", args: [-90, -180, 90, 180] },
     {
-      name: "basic",
-      args: [charsToNumbers(name)],
-    }
-  );
+      name: "linear",
+      args: [-126230400 * 16 * 16 * 8, 126230400 * 16 * 16 * 8],
+    },
+  ]);
 
   // Initialize spaces
   const space = new Space(

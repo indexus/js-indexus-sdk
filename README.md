@@ -157,10 +157,12 @@ import {
   Collection,
   Space,
   Locality,
+  Peer,
   Network,
   API,
-  charsToNumbers,
-} from 'js-indexus-sdk';
+  Spherical,
+  Linear,
+} from "js-indexus-sdk";
 
 function timeout(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -170,22 +172,13 @@ async function run() {
   const bootstraps = ["bootstrap.indexus.io|21000"];
 
   // Instantiate collections
-  const name = "R9zIWvyC3RcBy2AIH9jeZIqUywU";
-  const helloworld = new Collection(
-    name,
-    [
-      { name: "spherical", args: [-90, -180, 90, 180] },
-      {
-        name: "linear",
-        args: [-126230400 * 16 * 16 * 8, 126230400 * 16 * 16 * 8],
-      },
-    ],
-    { name: "static", args: [0, 1, 2, 0, 1, 2] },
+  const helloworld = new Collection("R9zIWvyC3RcBy2AIH9jeZIqUywU", [
+    { name: "spherical", args: [-90, -180, 90, 180] },
     {
-      name: "basic",
-      args: [charsToNumbers(name)],
-    }
-  );
+      name: "linear",
+      args: [-126230400 * 16 * 16 * 8, 126230400 * 16 * 16 * 8],
+    },
+  ]);
 
   // Initialize spaces
   const space = new Space(
@@ -204,15 +197,15 @@ async function run() {
   const geospatiality = space.dimension(0);
 
   options[geospatiality.name()] = {
-    origin: geospatiality.newPoint([0, 0]), // Origin coordinates
-    filters: geospatiality.newFilter([0, 0], [0, 360]), // Distance and direction filters
+    origin: geospatiality.newPoint([0, 0]), // San Francisco coordinates
+    filters: geospatiality.newFilter([0, 0], [0, 360]), // Distance in km, direction in degrees
   };
 
   const temporality = space.dimension(1);
 
   options[temporality.name()] = {
     origin: temporality.newPoint([Date.now() / 1000]), // Current time in Unix timestamp
-    filters: temporality.newFilter([0, 0], [0]), // Time filters
+    filters: temporality.newFilter([0, 0], [0]), // One year in seconds
   };
 
   // Define cap, limit, and step
@@ -223,7 +216,7 @@ async function run() {
     send: (result) => console.log("Output:", result),
   };
   const monitoring = {
-    send: (message) => {}, // Optional monitoring handler
+    send: (message) => {}, //console.log("Monitoring:", message),
   };
 
   // Create a new Network instance

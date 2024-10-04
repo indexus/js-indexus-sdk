@@ -4,7 +4,9 @@ import { Spherical } from "../library/dimensions/spherical.js";
 import { Linear } from "../library/dimensions/linear.js";
 import { Capped } from "../library/masks/capped.js";
 import { Static } from "../library/masks/static.js";
-import { Basic } from "../library/offsets/basic.js";
+import { Basic as Offset } from "../library/offsets/basic.js";
+import { Basic as Mask } from "../library/masks/basic.js";
+import { charsToNumbers } from "../utilities/encoding.js";
 
 const DIMENSIONS = {
   spherical: Spherical,
@@ -16,6 +18,7 @@ function mapDimension(name, args) {
 }
 
 const MASKS = {
+  basic: Mask,
   capped: Capped,
   static: Static,
 };
@@ -25,7 +28,7 @@ function mapMask(name, args) {
 }
 
 const OFFSETS = {
-  basic: Basic,
+  basic: Offset,
 };
 
 function mapOffset(name, args) {
@@ -33,16 +36,22 @@ function mapOffset(name, args) {
 }
 
 class Collection extends BaseCollection {
-  constructor(name, dimensions, mask, offset) {
+  constructor(name, dimensions) {
     super();
 
     this._name = name;
     this._dimensions = [];
-    dimensions.forEach((dimension) => {
-      this._dimensions.push(mapDimension(dimension.name, dimension.args));
-    });
-    this._mask = mapMask(mask.name, mask.args);
-    this._offset = mapOffset(offset.name, offset.args);
+
+    const m = dimensions.reduce((total, dimension) => {
+      const d = mapDimension(dimension.name, dimension.args);
+      this._dimensions.push(d);
+      return total + d.pointLength();
+    }, 0);
+
+    const mask = Array.from({ length: m + 1 }, (_, i) => i);
+
+    this._mask = mapMask("basic", mask);
+    this._offset = mapOffset("basic", [charsToNumbers(name)]);
   }
 
   /**
