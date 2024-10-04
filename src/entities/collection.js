@@ -13,8 +13,8 @@ const DIMENSIONS = {
   linear: Linear,
 };
 
-function mapDimension(name, args) {
-  return new DIMENSIONS[name](args);
+function mapDimension(type, args) {
+  return new DIMENSIONS[type](args);
 }
 
 const MASKS = {
@@ -23,16 +23,16 @@ const MASKS = {
   static: Static,
 };
 
-function mapMask(name, args) {
-  return new MASKS[name](args);
+function mapMask(type, args) {
+  return new MASKS[type](args);
 }
 
 const OFFSETS = {
   basic: Offset,
 };
 
-function mapOffset(name, args) {
-  return new OFFSETS[name](args);
+function mapOffset(type, args) {
+  return new OFFSETS[type](args);
 }
 
 class Collection extends BaseCollection {
@@ -43,7 +43,7 @@ class Collection extends BaseCollection {
     this._dimensions = [];
 
     const m = dimensions.reduce((total, dimension) => {
-      const d = mapDimension(dimension.name, dimension.args);
+      const d = mapDimension(dimension.type, dimension.args);
       this._dimensions.push(d);
       return total + d.pointLength();
     }, 0);
