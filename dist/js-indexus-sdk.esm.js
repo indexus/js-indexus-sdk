@@ -1195,8 +1195,14 @@ class Linear extends Dimension {
   }
 
   filterDirection(filter, direction) {
-    // TODO
-    return true;
+    const srcValue = filter.direction;
+    const directionValue = direction.value()[0];
+
+    if (srcValue === 0 || directionValue === 0) {
+      return true;
+    }
+
+    return srcValue === directionValue;
   }
 }
 
