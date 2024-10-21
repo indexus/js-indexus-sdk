@@ -8426,4 +8426,4 @@ API.prototype.pingPeer = pingPeer;
 API.prototype.addItem = addItem;
 API.prototype.getSet = getSet;
 
-export { API, Collection, Item$1 as Item, Linear, Locality, Network, Peer, Space, Spherical, decodeUrl64, encodeUrl64 };
+export { API, Collection, Item$1 as Item, Linear, Locality, Network, Peer, Space, Spherical, decodeUrl64, encodeUrl64, parent };

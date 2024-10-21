@@ -8443,6 +8443,7 @@
   exports.Spherical = Spherical;
   exports.decodeUrl64 = decodeUrl64;
   exports.encodeUrl64 = encodeUrl64;
+  exports.parent = parent;
 
   Object.defineProperty(exports, '__esModule', { value: true });
 
