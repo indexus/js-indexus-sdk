@@ -1,5 +1,6 @@
 // Entities
 export { Item } from "./entities/item.js";
+export { Set } from "./entities/set.js";
 export { Collection } from "./entities/collection.js";
 export { Space } from "./entities/space.js";
 
