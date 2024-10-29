@@ -16,10 +16,11 @@ class API {
    * @param {Peer} peer - The peer to which the item will be added.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
+   * @param {number[]} metrics - The metrics of the item to add.
    * @param {string} reference - The unique identifier of the item to add.
    * @returns {Promise<any>} - A promise that resolves when the item is added.
    */
-  async addItem(peer, collection, location, reference) {}
+  async addItem(peer, collection, location, metrics, reference) {}
 
   /**
    * Retrieves a set of items from a collection at a specific location on a peer.

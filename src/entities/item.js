@@ -1,11 +1,12 @@
 import { Item as BaseItem } from "../model/index.js";
 
 class Item extends BaseItem {
-  constructor(collection, hash, id) {
+  constructor(collection, hash, metrics, id) {
     super();
 
     this._collection = collection;
     this._hash = hash;
+    this._metrics = metrics;
     this._id = id;
   }
 
@@ -31,6 +32,14 @@ class Item extends BaseItem {
    */
   count() {
     return 1;
+  }
+
+  /**
+   * Returns the metrics associated with this element.
+   * @returns {number[]}
+   */
+  metrics() {
+    return this._metrics;
   }
 
   /**

@@ -41,23 +41,21 @@ export async function getSet(peer, collection, location) {
       const elements = [];
 
       for (const [key, value] of Object.entries(setData)) {
-        if (value === 1) {
+        if (value.count === 1) {
           // It's an Item
           // Assuming the key is in the format 'hash:reference'
           const [hash, reference] = key.split(":");
           if (hash && reference) {
-            elements.push(new Item(collection, hash, reference));
+            elements.push(new Item(collection, hash, value.metrics, reference));
           } else {
             console.warn(`Invalid item key format: ${key}`);
           }
-        } else if (typeof value === "number") {
+        } else {
           // It's a Set
           // Assuming the key is the hash, and value is the count
           const hash = key;
-          const count = value;
-          elements.push(new Set(collection, hash, count));
-        } else {
-          console.warn(`Unknown set entry format: ${key}: ${value}`);
+          const count = value.count;
+          elements.push(new Set(collection, hash, count, value.metrics));
         }
       }
 

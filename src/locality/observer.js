@@ -3,7 +3,13 @@ import { Item, Monitoring, State } from "../model/index.js";
 
 export async function addItem(item) {
   if (item instanceof Item) {
-    await this.network.addItem(item.collection(), ROOT, item.hash(), item.id());
+    await this.network.addItem(
+      item.collection(),
+      ROOT,
+      item.hash(),
+      item.metrics(),
+      item.id()
+    );
 
     this.monitoring.send(new Monitoring(this.level + 1, State.Added, item));
   }

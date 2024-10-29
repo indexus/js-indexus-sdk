@@ -5,13 +5,15 @@ import { Element } from "./Element.js";
 class Network {
   /**
    * Adds an item to a collection at a specific location in the network.
-   * The method selects the appropriate peer(s) to handle the request.
+   * If the operation fails, it retries with a different peer.
    * @param {string} collection - The name of the collection.
+   * @param {string} root - The targeted root set.
    * @param {string} location - The location identifier within the collection.
+   * @param {number[]} metrics - The metrics of the item to add.
    * @param {string} reference - The unique identifier of the item to add.
-   * @returns {Promise<void>} - A promise that resolves when the item is added.
+   * @returns {Promise<void>}
    */
-  static async addItem(collection, location, reference) {}
+  static async addItem(collection, root, location, metrics, reference) {}
 
   /**
    * Retrieves a set of items from a collection at a specific location in the network.

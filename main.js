@@ -15,7 +15,7 @@ function timeout(ms) {
 }
 
 async function run() {
-  const bootstraps = ["bootstrap.indexus.io|21000"];
+  const bootstraps = ["127.0.0.1|21001"];
 
   // Instantiate collections
   const helloworld = new Collection("R9zIWvyC3RcBy2AIH9jeZIqUywU", [
@@ -89,10 +89,11 @@ async function run() {
       ],
       27
     ),
+    [0.55, 0.78],
     "myFirstItemId"
   );
 
-  // await indexus.addItem(item);
+  await indexus.addItem(item);
 
   await timeout(3000);
 

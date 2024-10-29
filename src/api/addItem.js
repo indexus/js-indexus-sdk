@@ -14,12 +14,20 @@ import { getHostFromIP } from "../utilities/network.js";
  * @param {string} id - The ID of the item.
  * @returns {Promise<Object>} - The response from the server.
  */
-export async function addItem(peer, collection, root, location, reference) {
+export async function addItem(
+  peer,
+  collection,
+  root,
+  location,
+  metrics,
+  reference
+) {
   // Construct the POST request body
   const requestBody = {
     item: {
       collection: collection,
       location: location,
+      metrics: metrics,
       id: reference,
     },
     root: root,
