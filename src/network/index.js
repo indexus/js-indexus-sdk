@@ -62,10 +62,11 @@ class Network extends BaseNetwork {
    * @param {string} collection - The name of the collection.
    * @param {string} root - The targeted root set.
    * @param {string} location - The location identifier within the collection.
+   * @param {number[]} metrics - The metrics of the item to add.
    * @param {string} reference - The unique identifier of the item to add.
    * @returns {Promise<void>}
    */
-  async addItem(collection, root, location, reference) {
+  async addItem(collection, root, location, metrics, reference) {
     let attempts = this._attempts;
 
     const id = transform(collection, location);
@@ -80,7 +81,14 @@ class Network extends BaseNetwork {
       }
 
       try {
-        await this._api.addItem(peer, collection, root, location, reference);
+        await this._api.addItem(
+          peer,
+          collection,
+          root,
+          location,
+          metrics,
+          reference
+        );
         return;
       } catch (error) {
         // If the request fails, remove the peer from the table and retry

@@ -24,6 +24,14 @@ class Element extends Location {
   count() {
     return 0;
   }
+
+  /**
+   * Returns the metrics associated with this element.
+   * @returns {number[]}
+   */
+  metrics() {
+    return [];
+  }
 }
 
 export { Element };

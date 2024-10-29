@@ -299,6 +299,14 @@ class Element extends Location {
   count() {
     return 0;
   }
+
+  /**
+   * Returns the metrics associated with this element.
+   * @returns {number[]}
+   */
+  metrics() {
+    return [];
+  }
 }
 
 class Item$2 extends Element {
@@ -732,10 +740,11 @@ class API$1 {
    * @param {Peer} peer - The peer to which the item will be added.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
+   * @param {number[]} metrics - The metrics of the item to add.
    * @param {string} reference - The unique identifier of the item to add.
    * @returns {Promise<any>} - A promise that resolves when the item is added.
    */
-  async addItem(peer, collection, location, reference) {}
+  async addItem(peer, collection, location, metrics, reference) {}
 
   /**
    * Retrieves a set of items from a collection at a specific location on a peer.
@@ -753,13 +762,15 @@ class API$1 {
 class Network$1 {
   /**
    * Adds an item to a collection at a specific location in the network.
-   * The method selects the appropriate peer(s) to handle the request.
+   * If the operation fails, it retries with a different peer.
    * @param {string} collection - The name of the collection.
+   * @param {string} root - The targeted root set.
    * @param {string} location - The location identifier within the collection.
+   * @param {number[]} metrics - The metrics of the item to add.
    * @param {string} reference - The unique identifier of the item to add.
-   * @returns {Promise<void>} - A promise that resolves when the item is added.
+   * @returns {Promise<void>}
    */
-  static async addItem(collection, location, reference) {}
+  static async addItem(collection, root, location, metrics, reference) {}
 
   /**
    * Retrieves a set of items from a collection at a specific location in the network.
@@ -772,11 +783,12 @@ class Network$1 {
 }
 
 class Item$1 extends Item$2 {
-  constructor(collection, hash, id) {
+  constructor(collection, hash, metrics, id) {
     super();
 
     this._collection = collection;
     this._hash = hash;
+    this._metrics = metrics;
     this._id = id;
   }
 
@@ -805,6 +817,14 @@ class Item$1 extends Item$2 {
   }
 
   /**
+   * Returns the metrics associated with this element.
+   * @returns {number[]}
+   */
+  metrics() {
+    return this._metrics;
+  }
+
+  /**
    * Returns the unique identifier of this item.
    * @returns {string}
    */
@@ -814,12 +834,13 @@ class Item$1 extends Item$2 {
 }
 
 class Set extends Set$1 {
-  constructor(collection, hash, count) {
+  constructor(collection, hash, count, metrics) {
     super();
 
     this._collection = collection;
     this._hash = hash;
     this._count = count;
+    this._metrics = metrics;
   }
 
   /**
@@ -844,6 +865,14 @@ class Set extends Set$1 {
    */
   count() {
     return this._count;
+  }
+
+  /**
+   * Returns the metrics associated with this element.
+   * @returns {number[]}
+   */
+  metrics() {
+    return this._metrics;
   }
 }
 
@@ -1870,7 +1899,13 @@ function stream() {
 
 async function addItem$1(item) {
   if (item instanceof Item$2) {
-    await this.network.addItem(item.collection(), ROOT, item.hash(), item.id());
+    await this.network.addItem(
+      item.collection(),
+      ROOT,
+      item.hash(),
+      item.metrics(),
+      item.id()
+    );
 
     this.monitoring.send(new Monitoring(this.level + 1, State.Added, item));
   }
@@ -2208,10 +2243,11 @@ class Network extends Network$1 {
    * @param {string} collection - The name of the collection.
    * @param {string} root - The targeted root set.
    * @param {string} location - The location identifier within the collection.
+   * @param {number[]} metrics - The metrics of the item to add.
    * @param {string} reference - The unique identifier of the item to add.
    * @returns {Promise<void>}
    */
-  async addItem(collection, root, location, reference) {
+  async addItem(collection, root, location, metrics, reference) {
     let attempts = this._attempts;
 
     const id = transform(collection, location);
@@ -2226,7 +2262,14 @@ class Network extends Network$1 {
       }
 
       try {
-        await this._api.addItem(peer, collection, root, location, reference);
+        await this._api.addItem(
+          peer,
+          collection,
+          root,
+          location,
+          metrics,
+          reference
+        );
         return;
       } catch (error) {
         // If the request fails, remove the peer from the table and retry
@@ -8305,12 +8348,20 @@ async function pingPeer(ip, port) {
  * @param {string} id - The ID of the item.
  * @returns {Promise<Object>} - The response from the server.
  */
-async function addItem(peer, collection, root, location, reference) {
+async function addItem(
+  peer,
+  collection,
+  root,
+  location,
+  metrics,
+  reference
+) {
   // Construct the POST request body
   const requestBody = {
     item: {
       collection: collection,
       location: location,
+      metrics: metrics,
       id: reference,
     },
     root: root,
@@ -8370,23 +8421,21 @@ async function getSet(peer, collection, location) {
       const elements = [];
 
       for (const [key, value] of Object.entries(setData)) {
-        if (value === 1) {
+        if (value.count === 1) {
           // It's an Item
           // Assuming the key is in the format 'hash:reference'
           const [hash, reference] = key.split(":");
           if (hash && reference) {
-            elements.push(new Item$1(collection, hash, reference));
+            elements.push(new Item$1(collection, hash, value.metrics, reference));
           } else {
             console.warn(`Invalid item key format: ${key}`);
           }
-        } else if (typeof value === "number") {
+        } else {
           // It's a Set
           // Assuming the key is the hash, and value is the count
           const hash = key;
-          const count = value;
-          elements.push(new Set(collection, hash, count));
-        } else {
-          console.warn(`Unknown set entry format: ${key}: ${value}`);
+          const count = value.count;
+          elements.push(new Set(collection, hash, count, value.metrics));
         }
       }
 

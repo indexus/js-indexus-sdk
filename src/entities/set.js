@@ -1,12 +1,13 @@
 import { Set as BaseSet } from "../model/index.js";
 
 class Set extends BaseSet {
-  constructor(collection, hash, count) {
+  constructor(collection, hash, count, metrics) {
     super();
 
     this._collection = collection;
     this._hash = hash;
     this._count = count;
+    this._metrics = metrics;
   }
 
   /**
@@ -31,6 +32,14 @@ class Set extends BaseSet {
    */
   count() {
     return this._count;
+  }
+
+  /**
+   * Returns the metrics associated with this element.
+   * @returns {number[]}
+   */
+  metrics() {
+    return this._metrics;
   }
 }
 
