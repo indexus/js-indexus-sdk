@@ -37,7 +37,7 @@ export async function addItem(
   try {
     // Make the POST request to add the item to the collection
     await axios.post(
-      `http://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
+      `https://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
       requestBody,
       {
         headers: {

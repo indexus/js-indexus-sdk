@@ -8306,7 +8306,7 @@ async function pingPeer(ip, port) {
   try {
     // Make the POST request to ping the peer
     const response = await axios$1.post(
-      `http://${getHostFromIP(ip)}:${port}/ping`,
+      `https://${getHostFromIP(ip)}:${port}/ping`,
       requestBody,
       {
         headers: {
@@ -8367,7 +8367,7 @@ async function addItem(
   try {
     // Make the POST request to add the item to the collection
     await axios$1.post(
-      `http://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
+      `https://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
       requestBody,
       {
         headers: {
@@ -8392,7 +8392,7 @@ async function addItem(
  */
 async function getSet(peer, collection, location) {
   // Construct the GET request URL
-  const url = `http://${getHostFromIP(
+  const url = `https://${getHostFromIP(
     peer.ip()
   )}:${peer.port()}/set?collection=${encodeURIComponent(
     collection
