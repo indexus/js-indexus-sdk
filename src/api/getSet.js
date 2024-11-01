@@ -16,7 +16,7 @@ import { getHostFromIP } from "../utilities/network.js";
  */
 export async function getSet(peer, collection, location) {
   // Construct the GET request URL
-  const url = `http://${getHostFromIP(
+  const url = `https://${getHostFromIP(
     peer.ip()
   )}:${peer.port()}/set?collection=${encodeURIComponent(
     collection

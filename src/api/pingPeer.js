@@ -16,7 +16,7 @@ export async function pingPeer(ip, port) {
   try {
     // Make the POST request to ping the peer
     const response = await axios.post(
-      `http://${getHostFromIP(ip)}:${port}/ping`,
+      `https://${getHostFromIP(ip)}:${port}/ping`,
       requestBody,
       {
         headers: {
