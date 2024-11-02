@@ -18,13 +18,8 @@ async function run() {
   const bootstraps = ["127.0.0.1|21001"];
 
   // Instantiate collections
-  const helloworld = new Collection("R9zIWvyC3RcBy2AIH9jeZIqUywU", [
-    { type: "spherical", args: [-90, -180, 90, 180] },
-    {
-      type: "linear",
-      args: [-126230400 * 16 * 16 * 8, 126230400 * 16 * 16 * 8],
-    },
-  ]);
+  const dimensions = [{ type: "spherical", args: [-90, -180, 90, 180] }];
+  const helloworld = new Collection("MjYsMjQ5LDENjYsMTAyLDE2MCwx", dimensions);
 
   // Initialize spaces
   const space = new Space(
@@ -47,13 +42,6 @@ async function run() {
     filters: geospatiality.newFilter([0, 0], [0, 360]), // Distance in km, direction in degrees
   };
 
-  const temporality = space.dimension(1);
-
-  options[temporality.name()] = {
-    origin: temporality.newPoint([Math.floor(new Date().getTime() / 1000)]), // Current time in Unix timestamp
-    filters: temporality.newFilter([0, 0], [-1]), // One year in seconds
-  };
-
   // Define cap, limit, and step
   const cap = 2; // Maximum number of sets to process per layer
   const step = 10; // Number of items to return per output step
@@ -62,7 +50,7 @@ async function run() {
     send: (result) => console.log("Output:", result),
   };
   const monitoring = {
-    send: (message) => console.log("Monitoring:", message),
+    send: (message) => {}, // console.log("Monitoring:", message),
   };
 
   // Create a new Network instance
@@ -82,20 +70,12 @@ async function run() {
 
   const item = new Item(
     helloworld.name(),
-    space.encode(
-      [
-        geospatiality.newPoint([0, 0]),
-        temporality.newPoint([[Math.floor(new Date().getTime() / 1000)]]),
-      ],
-      27
-    ),
+    space.encode([geospatiality.newPoint([0, 0])], 27),
     [0.55, 0.78],
     "myFirstItemId"
   );
 
-  await indexus.addItem(item);
-
-  await timeout(3000);
+  // await indexus.addItem(item);
 
   try {
     await indexus.search();
