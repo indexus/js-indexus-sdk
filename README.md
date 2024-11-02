@@ -169,7 +169,7 @@ function timeout(ms) {
 }
 
 async function run() {
-  const bootstraps = ["bootstrap.indexus.io|21000"];
+  const bootstraps = ["bootstrap.testnet.indexus.network|21000"];
 
   // Instantiate collections
   const helloworld = new Collection("R9zIWvyC3RcBy2AIH9jeZIqUywU", [
@@ -346,7 +346,7 @@ While the Indexus SDK abstracts the complexities of the underlying peer-to-peer 
    **Cause**: Unable to connect to the bootstrap peer or network issues.
 
    **Solution**:
-   - Ensure that the bootstrap peer (`bootstrap.indexus.io:21000`) is accessible.
+   - Ensure that the bootstrap peer (`bootstrap.testnet.indexus.network:21000`) is accessible.
    - Check your network connection and firewall settings.
 
 ---
