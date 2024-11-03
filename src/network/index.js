@@ -142,7 +142,6 @@ class Network extends BaseNetwork {
         if (response.set !== null) return response.set;
 
         if (location !== ROOT && next === ROOT) {
-          console.log("ISSUE:", peer.hash(), collection, location);
           return [];
         }
         next = parent(next);

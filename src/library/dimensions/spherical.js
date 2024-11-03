@@ -74,9 +74,10 @@ class Filter extends BaseFilter {
 
 // Spherical class (implements Dimension)
 class Spherical extends BaseDimension {
-  constructor(args) {
+  constructor(name, args) {
     super();
 
+    this._name = name;
     this._ratio = this.pointDistance(
       new Point(0, args[0]),
       new Point(0, args[2])
@@ -85,6 +86,10 @@ class Spherical extends BaseDimension {
   }
 
   name() {
+    return this._name;
+  }
+
+  type() {
     return "spherical";
   }
 

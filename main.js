@@ -18,7 +18,9 @@ async function run() {
   const bootstraps = ["127.0.0.1|21001"];
 
   // Instantiate collections
-  const dimensions = [{ type: "spherical", args: [-90, -180, 90, 180] }];
+  const dimensions = [
+    { name: "gps", type: "spherical", args: [-90, -180, 90, 180] },
+  ];
   const helloworld = new Collection("MjYsMjQ5LDENjYsMTAyLDE2MCwx", dimensions);
 
   // Initialize spaces
