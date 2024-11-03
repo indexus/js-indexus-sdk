@@ -6,6 +6,13 @@ class Dimension {
   name() {
     return "";
   }
+  /**
+   * Returns the type of the dimension.
+   * @returns {string}
+   */
+  type() {
+    return "";
+  }
 
   /**
    * Returns the ratio used in calculations.

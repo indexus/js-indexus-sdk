@@ -173,9 +173,14 @@ async function run() {
 
   // Instantiate collections
   const helloworld = new Collection("R9zIWvyC3RcBy2AIH9jeZIqUywU", [
-    { name: "spherical", args: [-90, -180, 90, 180] },
+    { 
+      name: "gps", 
+      type: "spherical", 
+      args: [-90, -180, 90, 180], 
+    },
     {
-      name: "linear",
+      name: "time", 
+      type: "linear",
       args: [-126230400 * 16 * 16 * 8, 126230400 * 16 * 16 * 8],
     },
   ]);

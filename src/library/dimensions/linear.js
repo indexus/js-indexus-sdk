@@ -69,14 +69,19 @@ class Filter extends BaseFilter {
 
 // Linear class (implements Dimension)
 class Linear extends BaseDimension {
-  constructor(args) {
+  constructor(name, args) {
     super();
 
+    this._name = name;
     this._rootSegment = new Segment(args[0], args[1]);
     this._ratio = (this._rootSegment.end - this._rootSegment.start) / 2;
   }
 
   name() {
+    return this._name;
+  }
+
+  type() {
     return "linear";
   }
 

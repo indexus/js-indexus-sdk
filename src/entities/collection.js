@@ -13,8 +13,8 @@ const DIMENSIONS = {
   linear: Linear,
 };
 
-function mapDimension(type, args) {
-  return new DIMENSIONS[type](args);
+function mapDimension(type, name, args) {
+  return new DIMENSIONS[type](name, args);
 }
 
 const MASKS = {
@@ -43,7 +43,7 @@ class Collection extends BaseCollection {
     this._dimensions = [];
 
     const m = dimensions.reduce((total, dimension) => {
-      const d = mapDimension(dimension.type, dimension.args);
+      const d = mapDimension(dimension.type, dimension.name, dimension.args);
       this._dimensions.push(d);
       return total + d.pointLength();
     }, 0);

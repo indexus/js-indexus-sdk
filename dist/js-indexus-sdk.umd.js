@@ -69,6 +69,13 @@
     name() {
       return "";
     }
+    /**
+     * Returns the type of the dimension.
+     * @returns {string}
+     */
+    type() {
+      return "";
+    }
 
     /**
      * Returns the ratio used in calculations.
@@ -946,9 +953,10 @@
 
   // Spherical class (implements Dimension)
   class Spherical extends Dimension {
-    constructor(args) {
+    constructor(name, args) {
       super();
 
+      this._name = name;
       this._ratio = this.pointDistance(
         new Point$1(0, args[0]),
         new Point$1(0, args[2])
@@ -957,6 +965,10 @@
     }
 
     name() {
+      return this._name;
+    }
+
+    type() {
       return "spherical";
     }
 
@@ -1180,14 +1192,19 @@
 
   // Linear class (implements Dimension)
   class Linear extends Dimension {
-    constructor(args) {
+    constructor(name, args) {
       super();
 
+      this._name = name;
       this._rootSegment = new Segment(args[0], args[1]);
       this._ratio = (this._rootSegment.end - this._rootSegment.start) / 2;
     }
 
     name() {
+      return this._name;
+    }
+
+    type() {
       return "linear";
     }
 
@@ -1475,8 +1492,8 @@
     linear: Linear,
   };
 
-  function mapDimension(type, args) {
-    return new DIMENSIONS[type](args);
+  function mapDimension(type, name, args) {
+    return new DIMENSIONS[type](name, args);
   }
 
   const MASKS = {
@@ -1505,7 +1522,7 @@
       this._dimensions = [];
 
       const m = dimensions.reduce((total, dimension) => {
-        const d = mapDimension(dimension.type, dimension.args);
+        const d = mapDimension(dimension.type, dimension.name, dimension.args);
         this._dimensions.push(d);
         return total + d.pointLength();
       }, 0);
@@ -2325,7 +2342,6 @@
           if (response.set !== null) return response.set;
 
           if (location !== ROOT && next === ROOT) {
-            console.log("ISSUE:", peer.hash(), collection, location);
             return [];
           }
           next = parent(next);
