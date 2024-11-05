@@ -169,6 +169,7 @@ function timeout(ms) {
 }
 
 async function run() {
+  const protocol = "https"
   const bootstraps = ["bootstrap.testnet.indexus.network|21000"];
 
   // Instantiate collections
@@ -226,7 +227,7 @@ async function run() {
 
   // Create a new Network instance
   const api = new API();
-  const network = new Network(api, bootstraps);
+  const network = new Network(protocol, api, bootstraps);
 
   // Create a new Locality instance
   const indexus = new Locality(

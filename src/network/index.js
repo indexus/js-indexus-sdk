@@ -14,9 +14,10 @@ class Network extends BaseNetwork {
    * @param {API} api - The API instance used for network requests.
    * @param {string[]} hosts - An array of bootstrap hosts to initialize the network.
    */
-  constructor(api, hosts) {
+  constructor(protocol, api, hosts) {
     super();
 
+    this._protocol = protocol;
     this._api = api;
     this._hosts = hosts;
     this._table = new Table();
@@ -38,7 +39,7 @@ class Network extends BaseNetwork {
         this._hosts.map(async (host) => {
           try {
             const [ip, port] = host.split("|");
-            const peer = await this._api.pingPeer(ip, port);
+            const peer = await this._api.pingPeer(this._protocol, ip, port);
             bootstraps.push(peer);
           } catch (error) {
             console.warn(`Failed to add bootstrap peer with host ${host}.`);
@@ -82,6 +83,7 @@ class Network extends BaseNetwork {
 
       try {
         await this._api.addItem(
+          this._protocol,
           peer,
           collection,
           root,
@@ -129,7 +131,12 @@ class Network extends BaseNetwork {
       }
 
       try {
-        const response = await this._api.getSet(peer, collection, location);
+        const response = await this._api.getSet(
+          this._protocol,
+          peer,
+          collection,
+          location
+        );
 
         if (
           response.contact instanceof Peer &&

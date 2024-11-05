@@ -9,14 +9,15 @@ import { getHostFromIP } from "../utilities/network.js";
 /**
  * Retrieves a set from a collection at a specified location.
  *
+ * @param {string} protocol - Protocol to use to contact the peer http/https.
  * @param {Peer} peer - The peer to contact.
  * @param {string} collection - The ID of the collection.
  * @param {string} location - The location within the collection.
  * @returns {Promise<Object>} - The response from the server, including the set data.
  */
-export async function getSet(peer, collection, location) {
+export async function getSet(protocol, peer, collection, location) {
   // Construct the GET request URL
-  const url = `https://${getHostFromIP(
+  const url = `${protocol}://${getHostFromIP(
     peer.ip()
   )}:${peer.port()}/set?collection=${encodeURIComponent(
     collection
