@@ -6,17 +6,19 @@ import { getHostFromIP } from "../utilities/network.js";
 
 /**
  * Ping
- * @param {string} host - The host of the peer.
+ * @param {string} protocol - Protocol to use to contact the peer http/https.
+ * @param {string} ip - The ip of the peer
+ * @param {number} port - The port of the peer
  * @returns {Promise<Peer>} - A promise that resolves when the item is added.
  */
-export async function pingPeer(ip, port) {
+export async function pingPeer(protocol, ip, port) {
   // Construct the POST request body
   const requestBody = {};
 
   try {
     // Make the POST request to ping the peer
     const response = await axios.post(
-      `https://${getHostFromIP(ip)}:${port}/ping`,
+      `${protocol}://${getHostFromIP(ip)}:${port}/ping`,
       requestBody,
       {
         headers: {

@@ -737,13 +737,16 @@ class Peer$1 {
 class API$1 {
   /**
    * Ping
-   * @param {string} host - The host of the peer.
+   * @param {string} protocol - Protocol to use to contact the peer http/https.
+   * @param {string} ip - The ip of the peer
+   * @param {number} port - The port of the peer
    * @returns {Promise<Peer>} - A promise that resolves when the item is added.
    */
-  async pingPeer(host) {}
+  async pingPeer(protocol, ip, port) {}
 
   /**
    * Adds an item to a collection at a specific location on a peer.
+   * @param {string} protocol - Protocol to use to contact the peer http/https.
    * @param {Peer} peer - The peer to which the item will be added.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
@@ -751,16 +754,17 @@ class API$1 {
    * @param {string} reference - The unique identifier of the item to add.
    * @returns {Promise<any>} - A promise that resolves when the item is added.
    */
-  async addItem(peer, collection, location, metrics, reference) {}
+  async addItem(protocol, peer, collection, location, metrics, reference) {}
 
   /**
    * Retrieves a set of items from a collection at a specific location on a peer.
+   * @param {string} protocol - Protocol to use to contact the peer http/https.
    * @param {Peer} peer - The peer from which to retrieve the set.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
    * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
    */
-  async getSet(peer, collection, location) {}
+  async getSet(protocol, peer, collection, location) {}
 }
 
 /**
@@ -2212,9 +2216,10 @@ class Network extends Network$1 {
    * @param {API} api - The API instance used for network requests.
    * @param {string[]} hosts - An array of bootstrap hosts to initialize the network.
    */
-  constructor(api, hosts) {
+  constructor(protocol, api, hosts) {
     super();
 
+    this._protocol = protocol;
     this._api = api;
     this._hosts = hosts;
     this._table = new Table();
@@ -2236,7 +2241,7 @@ class Network extends Network$1 {
         this._hosts.map(async (host) => {
           try {
             const [ip, port] = host.split("|");
-            const peer = await this._api.pingPeer(ip, port);
+            const peer = await this._api.pingPeer(this._protocol, ip, port);
             bootstraps.push(peer);
           } catch (error) {
             console.warn(`Failed to add bootstrap peer with host ${host}.`);
@@ -2280,6 +2285,7 @@ class Network extends Network$1 {
 
       try {
         await this._api.addItem(
+          this._protocol,
           peer,
           collection,
           root,
@@ -2327,7 +2333,12 @@ class Network extends Network$1 {
       }
 
       try {
-        const response = await this._api.getSet(peer, collection, location);
+        const response = await this._api.getSet(
+          this._protocol,
+          peer,
+          collection,
+          location
+        );
 
         if (
           response.contact instanceof Peer &&
@@ -8316,17 +8327,19 @@ var axios$1 = axios;
 
 /**
  * Ping
- * @param {string} host - The host of the peer.
+ * @param {string} protocol - Protocol to use to contact the peer http/https.
+ * @param {string} ip - The ip of the peer
+ * @param {number} port - The port of the peer
  * @returns {Promise<Peer>} - A promise that resolves when the item is added.
  */
-async function pingPeer(ip, port) {
+async function pingPeer(protocol, ip, port) {
   // Construct the POST request body
   const requestBody = {};
 
   try {
     // Make the POST request to ping the peer
     const response = await axios$1.post(
-      `https://${getHostFromIP(ip)}:${port}/ping`,
+      `${protocol}://${getHostFromIP(ip)}:${port}/ping`,
       requestBody,
       {
         headers: {
@@ -8357,6 +8370,7 @@ async function pingPeer(ip, port) {
 /**
  * Adds an item to a collection.
  *
+ * @param {string} protocol - Protocol to use to contact the peer http/https.
  * @param {Peer} peer - The peer to contact
  * @param {string} collection - The ID of the collection.
  * @param {string} root - The targeted root set.
@@ -8365,6 +8379,7 @@ async function pingPeer(ip, port) {
  * @returns {Promise<Object>} - The response from the server.
  */
 async function addItem(
+  protocol,
   peer,
   collection,
   root,
@@ -8387,7 +8402,7 @@ async function addItem(
   try {
     // Make the POST request to add the item to the collection
     await axios$1.post(
-      `https://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
+      `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
       requestBody,
       {
         headers: {
@@ -8405,14 +8420,15 @@ async function addItem(
 /**
  * Retrieves a set from a collection at a specified location.
  *
+ * @param {string} protocol - Protocol to use to contact the peer http/https.
  * @param {Peer} peer - The peer to contact.
  * @param {string} collection - The ID of the collection.
  * @param {string} location - The location within the collection.
  * @returns {Promise<Object>} - The response from the server, including the set data.
  */
-async function getSet(peer, collection, location) {
+async function getSet(protocol, peer, collection, location) {
   // Construct the GET request URL
-  const url = `https://${getHostFromIP(
+  const url = `${protocol}://${getHostFromIP(
     peer.ip()
   )}:${peer.port()}/set?collection=${encodeURIComponent(
     collection

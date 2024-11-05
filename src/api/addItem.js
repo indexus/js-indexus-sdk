@@ -7,6 +7,7 @@ import { getHostFromIP } from "../utilities/network.js";
 /**
  * Adds an item to a collection.
  *
+ * @param {string} protocol - Protocol to use to contact the peer http/https.
  * @param {Peer} peer - The peer to contact
  * @param {string} collection - The ID of the collection.
  * @param {string} root - The targeted root set.
@@ -15,6 +16,7 @@ import { getHostFromIP } from "../utilities/network.js";
  * @returns {Promise<Object>} - The response from the server.
  */
 export async function addItem(
+  protocol,
   peer,
   collection,
   root,
@@ -37,7 +39,7 @@ export async function addItem(
   try {
     // Make the POST request to add the item to the collection
     await axios.post(
-      `https://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
+      `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
       requestBody,
       {
         headers: {
