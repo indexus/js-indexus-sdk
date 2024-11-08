@@ -2346,7 +2346,7 @@ class Network extends Network$1 {
 
         if (response.set !== null) return response.set;
 
-        if (location !== ROOT && next === ROOT) {
+        if (next === ROOT) {
           return [];
         }
         next = parent(next);
