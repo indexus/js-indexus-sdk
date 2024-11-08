@@ -148,7 +148,7 @@ class Network extends BaseNetwork {
 
         if (response.set !== null) return response.set;
 
-        if (location !== ROOT && next === ROOT) {
+        if (next === ROOT) {
           return [];
         }
         next = parent(next);
