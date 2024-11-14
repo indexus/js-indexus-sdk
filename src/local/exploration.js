@@ -31,7 +31,7 @@ export function prepare() {
     if (
       this.level > 0 &&
       (element.distance() > this.previous().radius ||
-        count >= this.cap * this.limit)
+        count >= this.option.cap * this.limit)
     ) {
       break;
     }
@@ -84,7 +84,6 @@ export function prepare() {
 }
 
 export async function query() {
-  const concurrencyLimit = 50; // Define your concurrency limit here
   const selectedList = this.current().selected.list;
 
   // Define the iterator function for each element
@@ -103,7 +102,7 @@ export async function query() {
   };
 
   // Use the asyncPool to process elements with limited concurrency
-  await asyncPool(concurrencyLimit, selectedList, processElement);
+  await asyncPool(this.option.concurrency, selectedList, processElement);
 
   // After all promises are resolved
   this.current().loaded.concat(this.current().selected.list);
@@ -111,8 +110,8 @@ export async function query() {
 }
 
 export function stream() {
-  let length = this.step;
-  if (this.current().selected.count < this.step) {
+  let length = this.option.step;
+  if (this.current().selected.count < this.option.step) {
     length = this.current().selected.count;
   }
 

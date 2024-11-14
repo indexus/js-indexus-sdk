@@ -131,7 +131,7 @@ node main.js
 - **Item**: Represents individual data items within a collection.
 - **Collection**: Manages a group of items with defined dimensions and configurations.
 - **Space**: Defines the operational space based on collection dimensions.
-- **Locality**: Handles adding items to collections and performing search operations.
+- **Local**: Handles adding items to collections and performing search operations.
 
 ### 2. Networking
 
@@ -156,7 +156,7 @@ import {
   Item,
   Collection,
   Space,
-  Locality,
+  Local,
   Peer,
   Network,
   API,
@@ -177,7 +177,7 @@ async function run() {
     { 
       name: "gps", 
       type: "spherical", 
-      args: [-90, -180, 90, 180], 
+      args: [-90, 90, -180, 180], 
     },
     {
       name: "time", 
@@ -196,20 +196,20 @@ async function run() {
   const spaces = {};
   spaces[helloworld.name()] = space;
 
-  // Initialize options object
-  const options = {};
+  // Initialize option object
+  const option = {};
 
-  // Create dimensions and options
+  // Create dimensions and option
   const geospatiality = space.dimension(0);
 
-  options[geospatiality.name()] = {
+  option[geospatiality.name()] = {
     origin: geospatiality.newPoint([0, 0]), // San Francisco coordinates
     filters: geospatiality.newFilter([0, 0], [0, 360]), // Distance in km, direction in degrees
   };
 
   const temporality = space.dimension(1);
 
-  options[temporality.name()] = {
+  option[temporality.name()] = {
     origin: temporality.newPoint([Date.now() / 1000]), // Current time in Unix timestamp
     filters: temporality.newFilter([0, 0], [0]), // One year in seconds
   };
@@ -229,10 +229,10 @@ async function run() {
   const api = new API();
   const network = new Network(protocol, api, bootstraps);
 
-  // Create a new Locality instance
-  const indexus = new Locality(
+  // Create a new Local instance
+  const indexus = new Local(
     spaces,
-    options,
+    option,
     cap,
     step,
     output,
@@ -274,12 +274,12 @@ run();
 2. **Configuration**:
    - **Bootstraps**: Defines the initial peer(s) to connect with.
    - **Collections**: Defines a collection with spherical and linear dimensions.
-3. **Spaces and Options**:
+3. **Spaces and option**:
    - **Space**: Initializes the operational space based on the collection's dimensions.
-   - **Options**: Sets up options for geospatiality and temporality, including origin points and filters.
+   - **option**: Sets up option for geospatiality and temporality, including origin points and filters.
 4. **Network Setup**:
    - **API & Network**: Initializes the API and network instances to manage interactions.
-   - **Locality**: Creates a locality instance to handle adding items and performing searches.
+   - **Local**: Creates a local instance to handle adding items and performing searches.
 5. **Adding an Item**:
    - **Item Creation**: Creates a new item with encoded spatial and temporal data.
    - **Adding to Collection**: Adds the item to the collection using the `indexus.addItem` method.
@@ -295,7 +295,7 @@ We are continuously working to enhance the Indexus SDK and its capabilities. Her
 
 - **SDK Enhancements**
   - **Aggregation Functions**: Implement sum, average, min, max operations on item properties.
-  - **Advanced Filtering and Sorting**: Introduce more robust filtering and sorting options within collections.
+  - **Advanced Filtering and Sorting**: Introduce more robust filtering and sorting option within collections.
 
 - **Documentation**
   - **Comprehensive Guides**: Expand our documentation with detailed guides and tutorials.

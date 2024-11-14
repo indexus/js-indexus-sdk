@@ -165,6 +165,16 @@ class Dimension {
     return null;
   }
 
+  /**
+   * Check if segments are overlapping
+   * @param {Segment} bounds
+   * @param {Segment} segment
+   * @returns {Boolean}
+   */
+  segmentsOverlap(point, segment) {
+    return null;
+  }
+
   // FilterDimension methods
 
   /**
@@ -198,12 +208,38 @@ class Dimension {
   }
 }
 
+class Point$2 {
+  /**
+   * Returns the value(s) representing the point.
+   * @returns {number[]}
+   */
+  value() {
+    return [];
+  }
+
+  /**
+   * Returns a string representation of the point.
+   * @returns {string}
+   */
+  print() {
+    return "";
+  }
+}
+
 class Segment$2 {
   /**
    * Returns the value(s) representing the segment.
    * @returns {number[]}
    */
   value() {
+    return [];
+  }
+
+  /**
+   * Returns the points composing the segment.
+   * @returns {Point[]}
+   */
+  points() {
     return [];
   }
 
@@ -367,24 +403,6 @@ class Monitoring {
    */
   element() {
     return this._element;
-  }
-}
-
-class Point$2 {
-  /**
-   * Returns the value(s) representing the point.
-   * @returns {number[]}
-   */
-  value() {
-    return [];
-  }
-
-  /**
-   * Returns a string representation of the point.
-   * @returns {string}
-   */
-  print() {
-    return "";
   }
 }
 
@@ -903,17 +921,26 @@ class Point$1 extends Point$2 {
 
 // Segment class (implements Segment)
 class Segment$1 extends Segment$2 {
-  constructor(south, west, north, east) {
+  constructor(south, north, west, east) {
     super();
 
     this.south = south;
-    this.west = west;
     this.north = north;
+    this.west = west;
     this.east = east;
   }
 
   value() {
     return [this.south, this.north, this.west, this.east];
+  }
+
+  points() {
+    return [
+      new Point$1(this.south, this.west),
+      new Point$1(this.south, this.east),
+      new Point$1(this.north, this.west),
+      new Point$1(this.north, this.east),
+    ];
   }
 
   print() {
@@ -923,17 +950,17 @@ class Segment$1 extends Segment$2 {
 
 // Direction class (implements Direction)
 class Direction$1 extends Direction$2 {
-  constructor(south, west, north, east) {
+  constructor(south, north, west, east) {
     super();
 
     this.south = south;
-    this.west = west;
     this.north = north;
+    this.west = west;
     this.east = east;
   }
 
   value() {
-    return [this.south, this.west, this.north, this.east];
+    return [this.south, this.north, this.west, this.east];
   }
 }
 
@@ -1011,8 +1038,8 @@ class Spherical extends Dimension {
   newSegment(coordinates) {
     return new Segment$1(
       coordinates[0],
-      coordinates[2],
       coordinates[1],
+      coordinates[2],
       coordinates[3]
     );
   }
@@ -1086,6 +1113,49 @@ class Spherical extends Dimension {
     return location;
   }
 
+  segmentsOverlap(segment1, segment2) {
+    if (segment1.north < segment2.south || segment2.north < segment1.south) {
+      return false;
+    }
+
+    const normalizeLng = (lng) => {
+      while (lng < -180) lng += 360;
+      while (lng >= 180) lng -= 360;
+      return lng;
+    };
+
+    const aWest = normalizeLng(segment1.west);
+    const aEast = normalizeLng(segment1.east);
+    const bWest = normalizeLng(segment2.west);
+    const bEast = normalizeLng(segment2.east);
+
+    const lngOverlap = (west1, east1, west2, east2) => {
+      const wraps = (west, east) => west > east;
+
+      if (!wraps(west1, east1) && !wraps(west2, east2)) {
+        return west1 <= east2 && east1 >= west2;
+      }
+
+      if (wraps(west1, east1)) {
+        return (
+          lngOverlap(west1, 180, west2, east2) ||
+          lngOverlap(-180, east1, west2, east2)
+        );
+      }
+
+      if (wraps(west2, east2)) {
+        return (
+          lngOverlap(west1, east1, west2, 180) ||
+          lngOverlap(west1, east1, -180, east2)
+        );
+      }
+
+      return false;
+    };
+
+    return lngOverlap(aWest, aEast, bWest, bEast);
+  }
+
   newFilter(distance, direction) {
     return new Filter$1(distance[0], distance[1], direction[0], direction[1]);
   }
@@ -1155,6 +1225,10 @@ class Segment extends Segment$2 {
 
   value() {
     return [this.start, this.end];
+  }
+
+  points() {
+    return [new Point(this.start), new Point(this.end)];
   }
 
   print() {
@@ -1265,6 +1339,10 @@ class Linear extends Dimension {
       direction._value = -1;
     }
     return direction;
+  }
+
+  segmentsOverlap(segment1, segment2) {
+    return segment1.start <= segment2.end && segment1.end >= segment2.start;
   }
 
   newFilter(distance, direction) {
@@ -1587,6 +1665,15 @@ class Space {
     return this._coordinatesToPoints(coordinates);
   }
 
+  newSegment(coordinates) {
+    const segments = [];
+    for (let i = 0; i < this.dimensions.length; i++) {
+      const dimension = this.dimensions[i];
+      segments[i] = dimension.newSegment(coordinates[i]);
+    }
+    return segments;
+  }
+
   newFilter(distance, direction) {
     return this._coordinatesToFilters(distance, direction);
   }
@@ -1597,6 +1684,16 @@ class Space {
 
   decode(hash) {
     return this._coordinatesToSegments(this._decode(hash));
+  }
+
+  points(bounds) {
+    return this._boundsToPoints(bounds);
+  }
+
+  overlap(bounds, segments) {
+    return this.dimensions.every((dimension, idx) =>
+      dimension.segmentsOverlap(bounds[idx], segments[idx])
+    );
   }
 
   // Private methods
@@ -1713,6 +1810,34 @@ class Space {
 
     return indexes;
   }
+
+  _boundsToPoints(bounds) {
+    let coordinates = [];
+
+    this.dimensions.forEach((dimension, i) => {
+      const tmp = [];
+
+      dimension
+        .newSegment(bounds[i])
+        .points()
+        .forEach((point) => {
+          if (i === 0) {
+            tmp.push(point.value());
+            return;
+          }
+
+          coordinates.forEach((coordinate) => {
+            tmp.push([coordinate, point.value()]);
+          });
+        });
+
+      coordinates = tmp;
+    });
+
+    return coordinates.map((coordinate) =>
+      this._coordinatesToPoints(coordinate)
+    );
+  }
 }
 
 class Store {
@@ -1787,7 +1912,7 @@ function getHostFromIP(ip) {
   return host;
 }
 
-async function run() {
+async function run$1() {
   if (this.prepare()) {
     if (this.current().final) {
       this.stream();
@@ -1816,7 +1941,7 @@ function prepare() {
     if (
       this.level > 0 &&
       (element.distance() > this.previous().radius ||
-        count >= this.cap * this.limit)
+        count >= this.option.cap * this.limit)
     ) {
       break;
     }
@@ -1869,7 +1994,6 @@ function prepare() {
 }
 
 async function query() {
-  const concurrencyLimit = 50; // Define your concurrency limit here
   const selectedList = this.current().selected.list;
 
   // Define the iterator function for each element
@@ -1888,7 +2012,7 @@ async function query() {
   };
 
   // Use the asyncPool to process elements with limited concurrency
-  await asyncPool(concurrencyLimit, selectedList, processElement);
+  await asyncPool(this.option.concurrency, selectedList, processElement);
 
   // After all promises are resolved
   this.current().loaded.concat(this.current().selected.list);
@@ -1896,8 +2020,8 @@ async function query() {
 }
 
 function stream() {
-  let length = this.step;
-  if (this.current().selected.count < this.step) {
+  let length = this.option.step;
+  if (this.current().selected.count < this.option.step) {
     length = this.current().selected.count;
   }
 
@@ -1967,7 +2091,7 @@ function addLocation(space, element) {
     location.push(segment);
 
     const dimension = space.dimension(i);
-    const option = this.options[dimension.name()];
+    const option = this.option[dimension.name()];
 
     const distance = dimension.segmentDistance(option.origin, segment);
     distances.push(distance);
@@ -1987,42 +2111,22 @@ function addLocation(space, element) {
   return active;
 }
 
-class Option {
-  constructor(origin, filters) {
+class Option$1 {
+  constructor(origin, filters, concurrency, cap, step) {
     this.origin = origin;
     this.filters = filters;
-  }
-}
-
-function newOption(key, coordinates, distances, directions) {
-  const dimension = this.dimensions()[key];
-  return new Option(
-    dimension.newPoint(coordinates),
-    dimension.newFilter(distances, directions)
-  );
-}
-
-function checkOptions() {
-  const missing = [];
-  for (const dimension in this.dimensions()) {
-    if (!this.options.hasOwnProperty(dimension)) {
-      missing.push(dimension);
-    }
-  }
-  if (missing.length > 0) {
-    throw new Error(`Missing option for dimensions: ${missing.join(", ")}`);
-  }
-}
-
-class Locality {
-  constructor(spaces, options, cap, step, output, monitoring, network) {
-    this.spaces = spaces;
-    this.options = options;
+    this.concurrency = concurrency;
     this.cap = cap;
+    this.step = step;
+  }
+}
+class Local {
+  constructor(spaces, option, output, monitoring, network) {
+    this.spaces = spaces;
+    this.option = option;
     this.limit = 0;
     this.level = 0;
     this.sets = [new Layer()];
-    this.step = step;
     this.output = output;
     this.monitoring = monitoring;
     this.network = network;
@@ -2057,7 +2161,7 @@ class Locality {
   }
 
   async search() {
-    this.limit += this.step;
+    this.limit += this.option.step;
     await this.run();
   }
 
@@ -2084,15 +2188,143 @@ class Locality {
   }
 }
 
-Locality.prototype.run = run;
-Locality.prototype.prepare = prepare;
-Locality.prototype.query = query;
-Locality.prototype.stream = stream;
-Locality.prototype.addItem = addItem$1;
-Locality.prototype.getSet = getSet$1;
-Locality.prototype.addLocation = addLocation;
-Locality.prototype.newOption = newOption;
-Locality.prototype.checkOptions = checkOptions;
+Local.prototype.run = run$1;
+Local.prototype.prepare = prepare;
+Local.prototype.query = query;
+Local.prototype.stream = stream;
+Local.prototype.addItem = addItem$1;
+Local.prototype.getSet = getSet$1;
+Local.prototype.addLocation = addLocation;
+
+function aggregate(data) {
+  if (!data.length) return [];
+
+  const numBounds = data[0]._bounds.length;
+  const results = [];
+
+  for (let i = 0; i < numBounds; i++) {
+    const groups = new Map();
+
+    data.forEach((item) => {
+      const key = JSON.stringify(item._bounds[i]);
+
+      if (!groups.has(key)) {
+        groups.set(key, {
+          _hash: [],
+          _count: 0,
+          _metrics: Array(item._metrics.length).fill(0),
+          _bounds: [],
+          groupBound: item._bounds[i],
+        });
+      }
+
+      const group = groups.get(key);
+      group._hash.push(item._hash);
+      group._count += item._count;
+      item._metrics.forEach((m, idx) => {
+        group._metrics[idx] += m;
+      });
+      const otherBound = item._bounds.filter((_, idx) => idx !== i)[0];
+      group._bounds.push(otherBound);
+    });
+
+    const aggregated = Array.from(groups.values()).map((g) => ({
+      _hash: g._hash,
+      _count: g._count,
+      _metrics: g._metrics,
+      _bounds: g._bounds,
+      groupBound: g.groupBound,
+    }));
+
+    results.push(aggregated);
+  }
+
+  return results;
+}
+
+async function run(selected = { "@": true }, items = []) {
+  const sets = [];
+  const selectedList = Object.keys(selected);
+
+  selected = {};
+
+  const processElement = async (element) => {
+    try {
+      const set = await this.network.getSet(this.collection.name(), element);
+
+      if (set.length > 0) {
+        set.forEach((elm) => {
+          elm._parent = element;
+          elm._bounds = this.space.decode(elm._hash);
+
+          if (
+            this.space.overlap(this.space.newSegment(this.bounds), elm._bounds)
+          ) {
+            if (elm instanceof Item$2) {
+              items.push(elm);
+            } else if (elm instanceof Set$1) {
+              sets.push(elm);
+              selected[elm._hash] = true;
+            }
+          }
+        });
+      }
+    } catch (error) {
+      console.error(`Error processing element ${element}:`, error);
+    }
+  };
+
+  await asyncPool(this.option.concurrencyLimit, selectedList, processElement);
+
+  const grouped = this.aggregate(sets);
+
+  if (
+    sets.length > 0 &&
+    grouped[this.option.dimension].length < this.option.resolution
+  ) {
+    return await this.run(selected, items);
+  }
+
+  items.forEach((item) => {
+    sets.forEach((set) => {
+      if (item._hash.startsWith(set._hash)) {
+        set._count--;
+        set._metrics = set._metrics.map(
+          (metric, index) => metric - item._metrics[index]
+        );
+      }
+    });
+  });
+
+  return { items, sets, grouped };
+}
+
+class Option {
+  constructor(dimension, resolution, concurrency) {
+    this.dimension = dimension;
+    this.resolution = resolution;
+    this.concurrency = concurrency;
+  }
+}
+
+class Progressive {
+  constructor(collection, space, option, output, monitoring, network) {
+    this.collection = collection;
+    this.space = space;
+    this.option = option;
+    this.output = output;
+    this.monitoring = monitoring;
+    this.network = network;
+  }
+
+  async search(bounds) {
+    this.bounds = bounds;
+    return await this.run();
+  }
+}
+
+Progressive.prototype.run = run;
+Progressive.prototype.aggregate = aggregate;
 
 class Peer extends Peer$1 {
   /**
@@ -2209,10 +2441,12 @@ class Table {
 class Network extends Network$1 {
   /**
    * Constructs a new Network instance.
+   * @param {string} protocol - The protocol identifier.
    * @param {API} api - The API instance used for network requests.
    * @param {string[]} hosts - An array of bootstrap hosts to initialize the network.
+   * @param {number} cacheSize - The maximum number of sets to keep in the cache.
    */
-  constructor(protocol, api, hosts) {
+  constructor(protocol, api, hosts, cacheSize = 100) {
     super();
 
     this._protocol = protocol;
@@ -2220,6 +2454,10 @@ class Network extends Network$1 {
     this._hosts = hosts;
     this._table = new Table();
     this._attempts = 3;
+
+    // Initialize the cache with a maximum size
+    this._cache = new Map();
+    this._cacheSize = cacheSize;
 
     // Initialize the network by searching for peers
     this.discoverPeers();
@@ -2300,7 +2538,7 @@ class Network extends Network$1 {
         attempts--;
         if (attempts == 0) {
           // If all attempts fail, throw an error
-          throw new Error("Failed to retrieve set after multiple attempts.");
+          throw new Error("Failed to add item after multiple attempts.");
         }
       }
     }
@@ -2309,6 +2547,7 @@ class Network extends Network$1 {
   /**
    * Retrieves a set of items from a collection at a specific location in the network.
    * If the operation fails, it retries with a different peer.
+   * Implements caching to store and retrieve sets efficiently.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
    * @returns {Promise<any>} - A promise that resolves with the retrieved set of items.
@@ -2316,6 +2555,17 @@ class Network extends Network$1 {
   async getSet(collection, location) {
     let attempts = this._attempts;
     let next = location;
+
+    const cacheKey = `${collection}:${location}`;
+
+    // Check the cache before making a network request
+    if (this._cache.has(cacheKey)) {
+      // Move the key to the end to mark it as recently used
+      const cachedSet = this._cache.get(cacheKey);
+      this._cache.delete(cacheKey);
+      this._cache.set(cacheKey, cachedSet);
+      return cachedSet;
+    }
 
     while (true) {
       const id = transform(collection, next);
@@ -2344,7 +2594,17 @@ class Network extends Network$1 {
           if (response.set === null) continue;
         }
 
-        if (response.set !== null) return response.set;
+        if (response.set !== null) {
+          // Before adding to cache, check if cache is at capacity
+          if (this._cache.size >= this._cacheSize) {
+            // Remove the least recently used (first inserted) item
+            const firstKey = this._cache.keys().next().value;
+            this._cache.delete(firstKey);
+          }
+          // Add the new set to the cache and mark it as recently used
+          this._cache.set(cacheKey, response.set);
+          return response.set;
+        }
 
         if (next === ROOT) {
           return [];
@@ -2354,7 +2614,7 @@ class Network extends Network$1 {
         // If the request fails, remove the peer from the table and retry
         this._table.remove(peer.id());
         console.warn(
-          `Failed to get set via peer ${peer.hash()}. Retrying with a different peer...$`
+          `Failed to get set via peer ${peer.hash()}. Retrying with a different peer...`
         );
 
         attempts--;
@@ -8507,4 +8767,4 @@ API.prototype.pingPeer = pingPeer;
 API.prototype.addItem = addItem;
 API.prototype.getSet = getSet;
 
-export { API, Collection, Item$1 as Item, Linear, Locality, Network, Peer, Set, Space, Spherical, decodeUrl64, encodeUrl64, parent };
+export { API, Collection, Item$1 as Item, Linear, Local, Network, Option$1 as OptionL, Option as OptionP, Peer, Progressive, Set, Space, Spherical, decodeUrl64, encodeUrl64, parent };

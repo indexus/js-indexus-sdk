@@ -6,18 +6,24 @@ import { Set } from "../entities/set.js";
 
 import { run, prepare, query, stream } from "./exploration.js";
 import { addItem, getSet, addLocation } from "./observer.js";
-import { newOption, checkOptions } from "./option.js";
 import { ROOT } from "../utilities/encoding.js";
 
-class Locality {
-  constructor(spaces, options, cap, step, output, monitoring, network) {
-    this.spaces = spaces;
-    this.options = options;
+class Option {
+  constructor(origin, filters, concurrency, cap, step) {
+    this.origin = origin;
+    this.filters = filters;
+    this.concurrency = concurrency;
     this.cap = cap;
+    this.step = step;
+  }
+}
+class Local {
+  constructor(spaces, option, output, monitoring, network) {
+    this.spaces = spaces;
+    this.option = option;
     this.limit = 0;
     this.level = 0;
     this.sets = [new Layer()];
-    this.step = step;
     this.output = output;
     this.monitoring = monitoring;
     this.network = network;
@@ -52,7 +58,7 @@ class Locality {
   }
 
   async search() {
-    this.limit += this.step;
+    this.limit += this.option.step;
     await this.run();
   }
 
@@ -79,14 +85,12 @@ class Locality {
   }
 }
 
-Locality.prototype.run = run;
-Locality.prototype.prepare = prepare;
-Locality.prototype.query = query;
-Locality.prototype.stream = stream;
-Locality.prototype.addItem = addItem;
-Locality.prototype.getSet = getSet;
-Locality.prototype.addLocation = addLocation;
-Locality.prototype.newOption = newOption;
-Locality.prototype.checkOptions = checkOptions;
+Local.prototype.run = run;
+Local.prototype.prepare = prepare;
+Local.prototype.query = query;
+Local.prototype.stream = stream;
+Local.prototype.addItem = addItem;
+Local.prototype.getSet = getSet;
+Local.prototype.addLocation = addLocation;
 
-export { Locality };
+export { Option, Local };

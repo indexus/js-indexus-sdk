@@ -54,7 +54,7 @@ export function addLocation(space, element) {
     location.push(segment);
 
     const dimension = space.dimension(i);
-    const option = this.options[dimension.name()];
+    const option = this.option[dimension.name()];
 
     const distance = dimension.segmentDistance(option.origin, segment);
     distances.push(distance);
