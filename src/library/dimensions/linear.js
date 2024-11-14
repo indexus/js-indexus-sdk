@@ -36,6 +36,10 @@ class Segment extends BaseSegment {
     return [this.start, this.end];
   }
 
+  points() {
+    return [new Point(this.start), new Point(this.end)];
+  }
+
   print() {
     const startDate = new Date(this.start * 1000);
     const endDate = new Date(this.end * 1000);
@@ -144,6 +148,10 @@ class Linear extends BaseDimension {
       direction._value = -1;
     }
     return direction;
+  }
+
+  segmentsOverlap(segment1, segment2) {
+    return segment1.start <= segment2.end && segment1.end >= segment2.start;
   }
 
   newFilter(distance, direction) {

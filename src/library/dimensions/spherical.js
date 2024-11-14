@@ -26,17 +26,26 @@ class Point extends BasePoint {
 
 // Segment class (implements Segment)
 class Segment extends BaseSegment {
-  constructor(south, west, north, east) {
+  constructor(south, north, west, east) {
     super();
 
     this.south = south;
-    this.west = west;
     this.north = north;
+    this.west = west;
     this.east = east;
   }
 
   value() {
     return [this.south, this.north, this.west, this.east];
+  }
+
+  points() {
+    return [
+      new Point(this.south, this.west),
+      new Point(this.south, this.east),
+      new Point(this.north, this.west),
+      new Point(this.north, this.east),
+    ];
   }
 
   print() {
@@ -46,17 +55,17 @@ class Segment extends BaseSegment {
 
 // Direction class (implements Direction)
 class Direction extends BaseDirection {
-  constructor(south, west, north, east) {
+  constructor(south, north, west, east) {
     super();
 
     this.south = south;
-    this.west = west;
     this.north = north;
+    this.west = west;
     this.east = east;
   }
 
   value() {
-    return [this.south, this.west, this.north, this.east];
+    return [this.south, this.north, this.west, this.east];
   }
 }
 
@@ -134,8 +143,8 @@ class Spherical extends BaseDimension {
   newSegment(coordinates) {
     return new Segment(
       coordinates[0],
-      coordinates[2],
       coordinates[1],
+      coordinates[2],
       coordinates[3]
     );
   }
@@ -207,6 +216,49 @@ class Spherical extends BaseDimension {
       location += 2;
     }
     return location;
+  }
+
+  segmentsOverlap(segment1, segment2) {
+    if (segment1.north < segment2.south || segment2.north < segment1.south) {
+      return false;
+    }
+
+    const normalizeLng = (lng) => {
+      while (lng < -180) lng += 360;
+      while (lng >= 180) lng -= 360;
+      return lng;
+    };
+
+    const aWest = normalizeLng(segment1.west);
+    const aEast = normalizeLng(segment1.east);
+    const bWest = normalizeLng(segment2.west);
+    const bEast = normalizeLng(segment2.east);
+
+    const lngOverlap = (west1, east1, west2, east2) => {
+      const wraps = (west, east) => west > east;
+
+      if (!wraps(west1, east1) && !wraps(west2, east2)) {
+        return west1 <= east2 && east1 >= west2;
+      }
+
+      if (wraps(west1, east1)) {
+        return (
+          lngOverlap(west1, 180, west2, east2) ||
+          lngOverlap(-180, east1, west2, east2)
+        );
+      }
+
+      if (wraps(west2, east2)) {
+        return (
+          lngOverlap(west1, east1, west2, 180) ||
+          lngOverlap(west1, east1, -180, east2)
+        );
+      }
+
+      return false;
+    };
+
+    return lngOverlap(aWest, aEast, bWest, bEast);
   }
 
   newFilter(distance, direction) {

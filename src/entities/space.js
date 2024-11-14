@@ -23,6 +23,15 @@ class Space {
     return this._coordinatesToPoints(coordinates);
   }
 
+  newSegment(coordinates) {
+    const segments = [];
+    for (let i = 0; i < this.dimensions.length; i++) {
+      const dimension = this.dimensions[i];
+      segments[i] = dimension.newSegment(coordinates[i]);
+    }
+    return segments;
+  }
+
   newFilter(distance, direction) {
     return this._coordinatesToFilters(distance, direction);
   }
@@ -33,6 +42,16 @@ class Space {
 
   decode(hash) {
     return this._coordinatesToSegments(this._decode(hash));
+  }
+
+  points(bounds) {
+    return this._boundsToPoints(bounds);
+  }
+
+  overlap(bounds, segments) {
+    return this.dimensions.every((dimension, idx) =>
+      dimension.segmentsOverlap(bounds[idx], segments[idx])
+    );
   }
 
   // Private methods
@@ -148,6 +167,34 @@ class Space {
     }
 
     return indexes;
+  }
+
+  _boundsToPoints(bounds) {
+    let coordinates = [];
+
+    this.dimensions.forEach((dimension, i) => {
+      const tmp = [];
+
+      dimension
+        .newSegment(bounds[i])
+        .points()
+        .forEach((point) => {
+          if (i === 0) {
+            tmp.push(point.value());
+            return;
+          }
+
+          coordinates.forEach((coordinate) => {
+            tmp.push([coordinate, point.value()]);
+          });
+        });
+
+      coordinates = tmp;
+    });
+
+    return coordinates.map((coordinate) =>
+      this._coordinatesToPoints(coordinate)
+    );
   }
 }
 

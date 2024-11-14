@@ -108,6 +108,16 @@ class Dimension {
     return null;
   }
 
+  /**
+   * Check if segments are overlapping
+   * @param {Segment} bounds
+   * @param {Segment} segment
+   * @returns {Boolean}
+   */
+  segmentsOverlap(point, segment) {
+    return null;
+  }
+
   // FilterDimension methods
 
   /**

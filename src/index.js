@@ -4,8 +4,9 @@ export { Set } from "./entities/set.js";
 export { Collection } from "./entities/collection.js";
 export { Space } from "./entities/space.js";
 
-// Locality
-export { Locality } from "./locality/index.js";
+// Local
+export { Local, Option as OptionL } from "./local/index.js";
+export { Progressive, Option as OptionP } from "./progressive/index.js";
 
 // Networking
 export { Peer } from "./network/peer.js";

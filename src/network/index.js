@@ -11,10 +11,12 @@ import { decodeUrl64, parent, ROOT, transform } from "../utilities/encoding.js";
 class Network extends BaseNetwork {
   /**
    * Constructs a new Network instance.
+   * @param {string} protocol - The protocol identifier.
    * @param {API} api - The API instance used for network requests.
    * @param {string[]} hosts - An array of bootstrap hosts to initialize the network.
+   * @param {number} cacheSize - The maximum number of sets to keep in the cache.
    */
-  constructor(protocol, api, hosts) {
+  constructor(protocol, api, hosts, cacheSize = 100) {
     super();
 
     this._protocol = protocol;
@@ -22,6 +24,10 @@ class Network extends BaseNetwork {
     this._hosts = hosts;
     this._table = new Table();
     this._attempts = 3;
+
+    // Initialize the cache with a maximum size
+    this._cache = new Map();
+    this._cacheSize = cacheSize;
 
     // Initialize the network by searching for peers
     this.discoverPeers();
@@ -102,7 +108,7 @@ class Network extends BaseNetwork {
         attempts--;
         if (attempts == 0) {
           // If all attempts fail, throw an error
-          throw new Error("Failed to retrieve set after multiple attempts.");
+          throw new Error("Failed to add item after multiple attempts.");
         }
       }
     }
@@ -111,6 +117,7 @@ class Network extends BaseNetwork {
   /**
    * Retrieves a set of items from a collection at a specific location in the network.
    * If the operation fails, it retries with a different peer.
+   * Implements caching to store and retrieve sets efficiently.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
    * @returns {Promise<any>} - A promise that resolves with the retrieved set of items.
@@ -118,6 +125,17 @@ class Network extends BaseNetwork {
   async getSet(collection, location) {
     let attempts = this._attempts;
     let next = location;
+
+    const cacheKey = `${collection}:${location}`;
+
+    // Check the cache before making a network request
+    if (this._cache.has(cacheKey)) {
+      // Move the key to the end to mark it as recently used
+      const cachedSet = this._cache.get(cacheKey);
+      this._cache.delete(cacheKey);
+      this._cache.set(cacheKey, cachedSet);
+      return cachedSet;
+    }
 
     while (true) {
       const id = transform(collection, next);
@@ -146,7 +164,17 @@ class Network extends BaseNetwork {
           if (response.set === null) continue;
         }
 
-        if (response.set !== null) return response.set;
+        if (response.set !== null) {
+          // Before adding to cache, check if cache is at capacity
+          if (this._cache.size >= this._cacheSize) {
+            // Remove the least recently used (first inserted) item
+            const firstKey = this._cache.keys().next().value;
+            this._cache.delete(firstKey);
+          }
+          // Add the new set to the cache and mark it as recently used
+          this._cache.set(cacheKey, response.set);
+          return response.set;
+        }
 
         if (next === ROOT) {
           return [];
@@ -156,7 +184,7 @@ class Network extends BaseNetwork {
         // If the request fails, remove the peer from the table and retry
         this._table.remove(peer.id());
         console.warn(
-          `Failed to get set via peer ${peer.hash()}. Retrying with a different peer...$`
+          `Failed to get set via peer ${peer.hash()}. Retrying with a different peer...`
         );
 
         attempts--;

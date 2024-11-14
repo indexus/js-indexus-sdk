@@ -20,7 +20,7 @@ async function run() {
 
   // Instantiate collections
   const dimensions = [
-    { name: "gps", type: "spherical", args: [-90, -180, 90, 180] },
+    { name: "gps", type: "spherical", args: [-90, 90, -180, 180] },
   ];
   const helloworld = new Collection("MjYsMjQ5LDENjYsMTAyLDE2MCwx", dimensions);
 
