@@ -14,7 +14,10 @@ export async function run(selected = { "@": true }, depth = 0, items = []) {
     const set = merged[hash];
 
     if (!set) {
-      merged[hash] = new Set(elm._collection, hash, 1, elm._metrics);
+      const n = new Set(elm._collection, hash, 1, elm._metrics);
+      n._parent = elm._parent;
+      n._bounds = this.space.decode(n._hash);
+      merged[hash] = n;
       return;
     }
 
