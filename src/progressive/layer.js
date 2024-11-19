@@ -1,11 +1,28 @@
-import { Item, Set } from "../model/index.js";
+import { Item } from "../entities/item.js";
+import { Set } from "../entities/set.js";
 import { asyncPool } from "../utilities/network.js";
 
-export async function run(selected = { "@": true }, items = []) {
+export async function run(selected = { "@": true }, depth = 0, items = []) {
   const sets = [];
   const selectedList = Object.keys(selected);
+  const merged = {};
 
   selected = {};
+
+  const consolidate = (elm) => {
+    const hash = elm._hash.substring(0, depth);
+    const set = merged[hash];
+
+    if (!set) {
+      merged[hash] = new Set(elm._collection, hash, 1, elm._metrics);
+      return;
+    }
+
+    set._count++;
+    set._metrics = set._metrics.map(
+      (metric, index) => metric + elm._metrics[index]
+    );
+  };
 
   const processElement = async (element) => {
     try {
@@ -16,11 +33,15 @@ export async function run(selected = { "@": true }, items = []) {
           elm._parent = element;
           elm._bounds = this.space.decode(elm._hash);
 
-          if (
-            this.space.overlap(this.space.newSegment(this.bounds), elm._bounds)
-          ) {
+          const overlap = this.space.overlap(
+            this.space.newSegment(this.bounds),
+            elm._bounds
+          );
+
+          if (overlap) {
             if (elm instanceof Item) {
               items.push(elm);
+              consolidate(elm);
             } else if (elm instanceof Set) {
               sets.push(elm);
               selected[elm._hash] = true;
@@ -33,27 +54,16 @@ export async function run(selected = { "@": true }, items = []) {
     }
   };
 
-  await asyncPool(this.option.concurrencyLimit, selectedList, processElement);
+  await asyncPool(this.option.concurrency, selectedList, processElement);
 
-  const grouped = this.aggregate(sets);
+  const grouped = this.aggregate([...sets, ...Object.values(merged)]);
 
   if (
     sets.length > 0 &&
     grouped[this.option.dimension].length < this.option.resolution
   ) {
-    return await this.run(selected, items);
+    return await this.run(selected, depth + 1, items);
   }
-
-  items.forEach((item) => {
-    sets.forEach((set) => {
-      if (item._hash.startsWith(set._hash)) {
-        set._count--;
-        set._metrics = set._metrics.map(
-          (metric, index) => metric - item._metrics[index]
-        );
-      }
-    });
-  });
 
   return { items, sets, grouped };
 }
