@@ -1607,7 +1607,7 @@ class Collection extends Collection$1 {
       return total + d.pointLength();
     }, 0);
 
-    const mask = Array.from({ length: m + 1 }, (_, i) => i);
+    const mask = Array.from({ length: m }, (_, i) => i);
 
     this._mask = mapMask("basic", mask);
     this._offset = mapOffset("basic", [charsToNumbers(name)]);
