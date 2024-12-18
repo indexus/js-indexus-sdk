@@ -5,8 +5,8 @@ export { Collection } from "./entities/collection.js";
 export { Space } from "./entities/space.js";
 
 // Local
-export { Local, Option as OptionL } from "./local/index.js";
-export { Progressive, Option as OptionP } from "./progressive/index.js";
+export { Local } from "./local/index.js";
+export { Grid } from "./grid/index.js";
 
 // Networking
 export { Peer } from "./network/peer.js";

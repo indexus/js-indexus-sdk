@@ -989,8 +989,8 @@
 
       this._name = name;
       this._ratio = this.pointDistance(
-        new Point$1(0, args[0]),
-        new Point$1(0, args[2])
+        new Point$1(args[0], args[2]),
+        new Point$1(args[1], args[3])
       );
       this._rootSegment = new Segment$1(args[0], args[1], args[2], args[3]);
     }
@@ -1100,6 +1100,26 @@
       return new Direction$1(0, 0, 0, 0);
     }
 
+    segmentCenter(segment) {
+      return new Point$1(
+        (segment.south + segment.north) / 2,
+        (segment.west + segment.east) / 2
+      );
+    }
+
+    segmentExtension(segment, offset) {
+      const root = this._rootSegment;
+      const latStep = offset * (root.north - root.south);
+      const lngStep = offset * (root.east - root.west);
+
+      return new Segment$1(
+        this._normalizeLat(segment.south - latStep),
+        this._normalizeLat(segment.north + latStep),
+        this._normalizeLng(segment.west - lngStep),
+        this._normalizeLng(segment.east + lngStep)
+      );
+    }
+
     segmentLocation(point, segment) {
       if (
         segment.south === this._rootSegment.south &&
@@ -1124,16 +1144,10 @@
         return false;
       }
 
-      const normalizeLng = (lng) => {
-        while (lng < -180) lng += 360;
-        while (lng >= 180) lng -= 360;
-        return lng;
-      };
-
-      const aWest = normalizeLng(segment1.west);
-      const aEast = normalizeLng(segment1.east);
-      const bWest = normalizeLng(segment2.west);
-      const bEast = normalizeLng(segment2.east);
+      const aWest = this._normalizeLng(segment1.west);
+      const aEast = this._normalizeLng(segment1.east);
+      const bWest = this._normalizeLng(segment2.west);
+      const bEast = this._normalizeLng(segment2.east);
 
       const lngOverlap = (west1, east1, west2, east2) => {
         const wraps = (west, east) => west > east;
@@ -1200,6 +1214,22 @@
         );
       }
       return true;
+    }
+
+    _normalizeLat(lat) {
+      if (lat > 90) {
+        return 90;
+      }
+      if (lat < -90) {
+        return -90;
+      }
+      return lat;
+    }
+
+    _normalizeLng(lng) {
+      while (lng < -180) lng += 360;
+      while (lng > 180) lng -= 360;
+      return lng;
     }
   }
 
@@ -1345,6 +1375,17 @@
         direction._value = -1;
       }
       return direction;
+    }
+
+    segmentCenter(segment) {
+      return new Point((segment.start + segment.end) / 2);
+    }
+
+    segmentExtension(segment, offset) {
+      const root = this._rootSegment;
+      const step = offset * (root.end - root.start);
+
+      return new Segment(segment.start - step, segment.end + step);
     }
 
     segmentsOverlap(segment1, segment2) {
@@ -1542,7 +1583,7 @@
     return details;
   }
 
-  function parent(hash) {
+  function parent$1(hash) {
     if (hash === ROOT) {
       return "";
     }
@@ -1650,9 +1691,15 @@
 
   class Space {
     constructor(dimensions, mask, offset) {
+      const size = dimensions.reduce((total, dimension) => {
+        return total + dimension.pointLength();
+      }, 0);
+
       this.dimensions = dimensions;
       this.mask = mask;
       this.offset = offset;
+      this.size = size;
+      this.step = 6 / size; // BASE64 = 2^6
     }
 
     signature() {
@@ -1661,10 +1708,6 @@
 
     dimension(i) {
       return this.dimensions[i];
-    }
-
-    size() {
-      return this.dimensions.length;
     }
 
     newPoint(coordinates) {
@@ -1692,8 +1735,32 @@
       return this._coordinatesToSegments(this._decode(hash));
     }
 
+    xyz(hash) {
+      return this._xyz(hash);
+    }
+
+    bounds(zoom, xyz) {
+      return this._coordinatesToSegments(this._bounds(zoom, xyz));
+    }
+
+    center(segments) {
+      return this.dimensions.map((dimension, i) =>
+        dimension.segmentCenter(segments[i])
+      );
+    }
+
+    extend(segments, offset) {
+      return this.dimensions.map((dimension, i) =>
+        dimension.segmentExtension(segments[i], offset)
+      );
+    }
+
     points(bounds) {
       return this._boundsToPoints(bounds);
+    }
+
+    root() {
+      return this._coordinatesToSegments(this._root());
     }
 
     overlap(bounds, segments) {
@@ -1776,6 +1843,57 @@
       return src;
     }
 
+    _xyz(hash) {
+      let coordinates = [];
+      let resolution = 0;
+
+      for (let i = 0; i < this._root().length / 2; i++) {
+        coordinates[i] = 0;
+      }
+
+      if (hash === ROOT) {
+        return { coordinates, resolution };
+      }
+
+      for (let l = 0; l < hash.length; l++) {
+        const idx = (64 + BASEURL64.indexOf(hash[l]) - this.offset.at(l)) % 64;
+        for (let n = 0; n <= 5; n++) {
+          const maskIndex = this.mask.at(l, n);
+          coordinates[maskIndex] *= 2;
+          resolution++;
+          if (((idx >> (5 - n)) & 1) === 1) {
+            coordinates[maskIndex] += 1;
+          }
+        }
+      }
+
+      resolution /= coordinates.length;
+
+      return { resolution, coordinates };
+    }
+
+    _bounds(xyz) {
+      const bounds = [];
+      const size = Math.pow(2, xyz.resolution);
+
+      let idx = 0;
+      for (let i = 0; i < this.dimensions.length; i++) {
+        for (let j = 0; j < this.dimensions[i].segmentLength() / 2; j++) {
+          const min = this._root()[idx * 2];
+          const max = this._root()[idx * 2 + 1];
+
+          const step = (max - min) / size;
+
+          bounds[idx * 2] = xyz.coordinates[idx] * step + min;
+          bounds[idx * 2 + 1] = (xyz.coordinates[idx] + 1) * step + min;
+
+          idx++;
+        }
+      }
+
+      return bounds;
+    }
+
     _coordinatesToPoints(coordinates) {
       const origin = [];
       for (let i = 0; i < this.dimensions.length; i++) {
@@ -1822,20 +1940,18 @@
 
       this.dimensions.forEach((dimension, i) => {
         const tmp = [];
+        const points = bounds[i].points();
 
-        dimension
-          .newSegment(bounds[i])
-          .points()
-          .forEach((point) => {
-            if (i === 0) {
-              tmp.push(point.value());
-              return;
-            }
+        points.forEach((point) => {
+          if (i === 0) {
+            tmp.push(point.value());
+            return;
+          }
 
-            coordinates.forEach((coordinate) => {
-              tmp.push([coordinate, point.value()]);
-            });
+          coordinates.forEach((coordinate) => {
+            tmp.push([coordinate, point.value()]);
           });
+        });
 
         coordinates = tmp;
       });
@@ -1918,7 +2034,7 @@
     return host;
   }
 
-  async function run$1() {
+  async function run() {
     if (this.prepare()) {
       if (this.current().final) {
         this.stream();
@@ -1936,7 +2052,7 @@
     await this.run();
   }
 
-  function prepare() {
+  function prepare$1() {
     this.current().indexed.sort();
 
     let selected = 0;
@@ -1947,7 +2063,7 @@
       if (
         this.level > 0 &&
         (element.distance() > this.previous().radius ||
-          count >= this.option.cap * this.limit)
+          count >= this.options.cap * this.limit)
       ) {
         break;
       }
@@ -2003,7 +2119,7 @@
     const selectedList = this.current().selected.list;
 
     // Define the iterator function for each element
-    const processElement = async (element) => {
+    const process = async (element) => {
       const s = element;
       try {
         const id = transform(s.collection(), s.hash());
@@ -2017,8 +2133,7 @@
       }
     };
 
-    // Use the asyncPool to process elements with limited concurrency
-    await asyncPool(this.option.concurrency, selectedList, processElement);
+    await asyncPool(this.network.getConcurrency(), selectedList, process);
 
     // After all promises are resolved
     this.current().loaded.concat(this.current().selected.list);
@@ -2026,8 +2141,8 @@
   }
 
   function stream() {
-    let length = this.option.step;
-    if (this.current().selected.count < this.option.step) {
+    let length = this.options.step;
+    if (this.current().selected.count < this.options.step) {
       length = this.current().selected.count;
     }
 
@@ -2042,20 +2157,6 @@
 
     this.current().selected.remove(length, length);
     this.output.send(result);
-  }
-
-  async function addItem$1(item) {
-    if (item instanceof Item$2) {
-      await this.network.addItem(
-        item.collection(),
-        ROOT,
-        item.hash(),
-        item.metrics(),
-        item.id()
-      );
-
-      this.monitoring.send(new Monitoring(this.level + 1, State.Added, item));
-    }
   }
 
   async function getSet$1(set, addSet) {
@@ -2097,39 +2198,32 @@
       location.push(segment);
 
       const dimension = space.dimension(i);
-      const option = this.option[dimension.name()];
+      const origin = this.options.origins[dimension.name()];
+      const filter = this.options.filters[dimension.name()];
 
-      const distance = dimension.segmentDistance(option.origin, segment);
+      const distance = dimension.segmentDistance(origin, segment);
       distances.push(distance);
 
-      const direction = dimension.segmentDirection(option.origin, segment);
+      const direction = dimension.segmentDirection(origin, segment);
       directions.push(direction);
 
       overall += distance / dimension.ratio() / segments.length;
 
       active =
         active &&
-        dimension.filterDirection(option.filters, direction) &&
-        dimension.filterDistance(option.filters, distance);
+        dimension.filterDirection(filter, direction) &&
+        dimension.filterDistance(filter, distance);
     }
 
     element.locate(location, distances, directions, overall);
+
     return active;
   }
 
-  class Option$1 {
-    constructor(origin, filters, concurrency, cap, step) {
-      this.origin = origin;
-      this.filters = filters;
-      this.concurrency = concurrency;
-      this.cap = cap;
-      this.step = step;
-    }
-  }
   class Local {
-    constructor(spaces, option, output, monitoring, network) {
+    constructor(spaces, options, output, monitoring, network) {
       this.spaces = spaces;
-      this.option = option;
+      this.options = options;
       this.limit = 0;
       this.level = 0;
       this.sets = [new Layer()];
@@ -2158,7 +2252,7 @@
       const dimensions = {};
       for (const key in this.spaces) {
         const space = this.spaces[key];
-        for (let i = 0; i < space.size(); i++) {
+        for (let i = 0; i < space.dimensions.length; i++) {
           const dimension = space.dimension(i);
           dimensions[dimension.name()] = dimension;
         }
@@ -2167,7 +2261,7 @@
     }
 
     async search() {
-      this.limit += this.option.step;
+      this.limit += this.options.step;
       await this.run();
     }
 
@@ -2194,13 +2288,258 @@
     }
   }
 
-  Local.prototype.run = run$1;
-  Local.prototype.prepare = prepare;
+  Local.prototype.run = run;
+  Local.prototype.prepare = prepare$1;
   Local.prototype.query = query;
   Local.prototype.stream = stream;
-  Local.prototype.addItem = addItem$1;
   Local.prototype.getSet = getSet$1;
   Local.prototype.addLocation = addLocation;
+
+  function prepare(zoom, bounds) {
+    const offset = this.options.offset;
+    const center = this.space.center(bounds);
+
+    const depthMax = Math.floor((zoom + offset) / this.space.step);
+    const depthMin = Math.floor((zoom - offset) / this.space.step);
+
+    const hashMax = this.space.encode(center, depthMax);
+    const hashMin = this.space.encode(center, depthMin);
+
+    if (
+      this.preload &&
+      this.preload.max === hashMax &&
+      this.preload.min === hashMin
+    ) {
+      return this.preload;
+    }
+
+    const step = offset / Math.pow(2, zoom);
+    const extended = this.space.extend(bounds, step);
+
+    return {
+      max: hashMax,
+      min: hashMin,
+      depth: depthMax,
+      extended: extended,
+      delta: true,
+    };
+  }
+
+  async function refresh(list, bounds, depth) {
+    const selected = [];
+
+    await Promise.all(list.map((elm) => this.process(selected, bounds, elm)));
+
+    if (depth) {
+      await this.refresh(selected, bounds, depth - 1);
+    }
+  }
+
+  async function process(selected, bounds, element) {
+    const collection = element._collection;
+    const hash = element._hash;
+    const length = hash === ROOT ? 0 : hash.length;
+
+    let set = element._items;
+
+    if (!set) {
+      try {
+        set = await this.network.getSet(collection, hash);
+      } catch (error) {
+        console.error(`Error processing element ${element}:`, error);
+      }
+    }
+
+    const elements = [];
+    const merged = {};
+
+    set.forEach((elm) => {
+      if (elm instanceof Item$1) {
+        this.consolidate(merged, length + 1, elm);
+        return;
+      }
+
+      elm._bounds = this.space.decode(elm._hash);
+      elm._xyz = this.space.xyz(elm._hash);
+
+      elements.push(
+        this.create(
+          elm._xyz,
+          elm._bounds,
+          elm._count,
+          elm._metrics,
+          undefined,
+          []
+        )
+      );
+
+      if (this.space.overlap(bounds, elm._bounds)) {
+        selected.push(elm);
+      }
+    });
+
+    Object.values(merged).forEach((elm) => {
+      elements.push(
+        this.create(
+          elm._xyz,
+          elm._bounds,
+          elm._count,
+          elm._metrics,
+          elm._items,
+          []
+        )
+      );
+
+      if (this.space.overlap(bounds, elm._bounds)) {
+        selected.push(elm);
+      }
+    });
+
+    await this.lock.acquireWrite();
+
+    try {
+      this.set(elements);
+    } finally {
+      this.lock.releaseWrite();
+    }
+  }
+
+  function consolidate(merged, length, elm) {
+    const hash = elm._hash.substring(0, length);
+    const set = merged[hash];
+
+    if (!set) {
+      const n = new Set(elm._collection, hash, 1, elm._metrics);
+
+      n._bounds = this.space.decode(n._hash);
+      n._xyz = this.space.xyz(n._hash);
+      n._items = [elm];
+
+      merged[hash] = n;
+      return;
+    }
+
+    set._count++;
+    set._items.push(elm);
+    set._metrics = set._metrics.map(
+      (metric, index) => metric + elm._metrics[index]
+    );
+  }
+
+  function create(xyz, bounds, count, metrics, items, children) {
+    return {
+      xyz,
+      bounds,
+      count,
+      metrics,
+      items,
+      children,
+    };
+  }
+
+  function equal(element1, element2) {
+    return JSON.stringify(element1) === JSON.stringify(element2);
+  }
+
+  function add(element) {
+    this.data[this.key(element.xyz)] = element;
+  }
+
+  function get(xyz) {
+    return this.data[this.key(xyz)];
+  }
+
+  function key(xyz) {
+    const values = [xyz.resolution, ...xyz.coordinates];
+    return values.join("-");
+  }
+
+  function parent(xyz) {
+    if (!xyz.resolution) {
+      return null;
+    }
+    return {
+      resolution: xyz.resolution - 1,
+      coordinates: xyz.coordinates.map((v) => Math.floor(v / this.n)),
+    };
+  }
+
+  function set(elements) {
+    const parents = {};
+
+    if (elements.length === 1) {
+      const element = elements[0];
+      const existing = this.get(element.xyz);
+
+      if (existing) {
+        this.add(element);
+        return;
+      }
+      // TODO FIX Parent
+    }
+
+    elements.forEach((element) => {
+      this.add(element);
+      this.merge(parents, element);
+    });
+
+    const sets = Object.values(parents);
+    if (sets.length) {
+      this.set(sets);
+    }
+  }
+
+  function merge$1(parents, element) {
+    const xyz = this.parent(element.xyz);
+
+    if (!xyz) return;
+
+    const key = this.key(xyz);
+    const parent = parents[key];
+
+    if (!parent) {
+      parents[key] = this.create(
+        xyz,
+        this.space.bounds(xyz),
+        element.count,
+        element.metrics,
+        undefined,
+        [element.xyz]
+      );
+      return;
+    }
+
+    parent.count += element.count;
+    parent.metrics = parent.metrics.map(
+      (metric, index) => metric + element.metrics[index]
+    );
+    parent.children.push(element.xyz);
+  }
+
+  function retrieve(resolution, bounds) {
+    const result = [];
+
+    const traverse = (xyz) => {
+      const element = this.get(xyz);
+
+      if (!this.space.overlap(bounds, element.bounds)) {
+        return;
+      }
+
+      if (!element.children.length || element.xyz.resolution === resolution) {
+        result.push(element);
+        return;
+      }
+
+      element.children.forEach((child) => {
+        traverse(child);
+      });
+    };
+
+    traverse(this.space.xyz(this.root._hash));
+
+    return result;
+  }
 
   function aggregate(data) {
     if (!data.length) return [];
@@ -2248,101 +2587,122 @@
     return results;
   }
 
-  async function run(selected = { "@": true }, depth = 0, items = []) {
-    const sets = [];
-    const selectedList = Object.keys(selected);
-    const merged = {};
+  // locker.js
+  class Locker {
+    constructor() {
+      this.readers = 0;
+      this.writer = false;
+      this.readQueue = [];
+      this.writeQueue = [];
+    }
 
-    selected = {};
-
-    const consolidate = (elm) => {
-      const hash = elm._hash.substring(0, depth);
-      const set = merged[hash];
-
-      if (!set) {
-        const n = new Set(elm._collection, hash, 1, elm._metrics);
-        n._parent = elm._parent;
-        n._bounds = this.space.decode(n._hash);
-        merged[hash] = n;
-        return;
-      }
-
-      set._count++;
-      set._metrics = set._metrics.map(
-        (metric, index) => metric + elm._metrics[index]
-      );
-    };
-
-    const processElement = async (element) => {
-      try {
-        const set = await this.network.getSet(this.collection.name(), element);
-
-        if (set.length > 0) {
-          set.forEach((elm) => {
-            elm._parent = element;
-            elm._bounds = this.space.decode(elm._hash);
-
-            const overlap = this.space.overlap(
-              this.space.newSegment(this.bounds),
-              elm._bounds
-            );
-
-            if (overlap) {
-              if (elm instanceof Item$1) {
-                items.push(elm);
-                consolidate(elm);
-              } else if (elm instanceof Set) {
-                sets.push(elm);
-                selected[elm._hash] = true;
-              }
-            }
-          });
+    async acquireRead() {
+      return new Promise((resolve) => {
+        if (!this.writer && this.writeQueue.length === 0) {
+          this.readers++;
+          resolve();
+        } else {
+          this.readQueue.push(resolve);
         }
-      } catch (error) {
-        console.error(`Error processing element ${element}:`, error);
+      });
+    }
+
+    releaseRead() {
+      this.readers--;
+      this._next();
+    }
+
+    async acquireWrite() {
+      return new Promise((resolve) => {
+        if (!this.writer && this.readers === 0) {
+          this.writer = true;
+          resolve();
+        } else {
+          this.writeQueue.push(resolve);
+        }
+      });
+    }
+
+    releaseWrite() {
+      this.writer = false;
+      this._next();
+    }
+
+    _next() {
+      if (this.writeQueue.length > 0 && this.readers === 0 && !this.writer) {
+        this.writer = true;
+        const resolve = this.writeQueue.shift();
+        resolve();
+      } else {
+        while (
+          this.readQueue.length > 0 &&
+          !this.writer &&
+          this.writeQueue.length === 0
+        ) {
+          this.readers++;
+          const resolve = this.readQueue.shift();
+          resolve();
+        }
       }
-    };
-
-    await asyncPool(this.option.concurrency, selectedList, processElement);
-
-    const grouped = this.aggregate([...sets, ...Object.values(merged)]);
-
-    if (
-      sets.length > 0 &&
-      grouped[this.option.dimension].length < this.option.resolution
-    ) {
-      return await this.run(selected, depth + 1, items);
-    }
-
-    return { items, sets, grouped };
-  }
-
-  class Option {
-    constructor(dimension, resolution, concurrency) {
-      this.dimension = dimension;
-      this.resolution = resolution;
-      this.concurrency = concurrency;
     }
   }
 
-  class Progressive {
-    constructor(collection, space, option, output, monitoring, network) {
+  class Grid {
+    constructor(collection, space, options, monitoring, network) {
       this.collection = collection;
       this.space = space;
-      this.option = option;
-      this.output = output;
+      this.n = 2;
+      this.data = {};
+      this.options = options;
       this.monitoring = monitoring;
       this.network = network;
+      this.root = new Set(collection, "@", undefined, undefined);
+      this.lock = new Locker();
     }
 
-    async search(bounds) {
-      this.bounds = bounds;
-      return await this.run();
+    async init() {
+      await this.refresh([this.root], this.space.root(), 0);
+    }
+
+    async display(zoom, bounds) {
+      this.preload = this.prepare(zoom, bounds);
+
+      if (this.preload.delta) {
+        this.preload.delta = false;
+
+        this.refresh([this.root], this.preload.extended, this.preload.depth);
+      }
+
+      await this.lock.acquireRead();
+
+      let data;
+
+      try {
+        data = this.retrieve(zoom, bounds);
+      } finally {
+        this.lock.releaseRead();
+      }
+
+      return data; // this.aggregate(data);
     }
   }
 
-  Progressive.prototype.run = run;
-  Progressive.prototype.aggregate = aggregate;
+  Grid.prototype.prepare = prepare;
+  Grid.prototype.refresh = refresh;
+  Grid.prototype.process = process;
+  Grid.prototype.consolidate = consolidate;
+
+  Grid.prototype.create = create;
+  Grid.prototype.equal = equal;
+  Grid.prototype.add = add;
+  Grid.prototype.get = get;
+  Grid.prototype.key = key;
+  Grid.prototype.parent = parent;
+  Grid.prototype.set = set;
+  Grid.prototype.merge = merge$1;
+  Grid.prototype.retrieve = retrieve;
+
+  Grid.prototype.aggregate = aggregate;
 
   class Peer extends Peer$1 {
     /**
@@ -2451,10 +2811,75 @@
     }
   }
 
+  // throttler.js
+
+  class Throttler {
+    /**
+     * Initializes the NetworkThrottler with a specified concurrency limit.
+     * @param {number} poolLimit - The maximum number of concurrent network calls.
+     */
+    constructor(poolLimit) {
+      this.poolLimit = poolLimit; // Maximum concurrent requests
+      this.activeCount = 0; // Currently active requests
+      this.queue = []; // Queue to hold pending requests
+    }
+
+    /**
+     * Enqueues a network call to be executed under the pool's constraints.
+     * @param {Function} taskFn - The network call function that returns a Promise.
+     * @returns {Promise} - A Promise that resolves with the result of the network call.
+     */
+    enqueue(taskFn) {
+      return new Promise((resolve, reject) => {
+        const executeTask = async () => {
+          this.activeCount++;
+          try {
+            const result = await taskFn();
+            resolve(result);
+          } catch (error) {
+            reject(error);
+          } finally {
+            this.activeCount--;
+            if (this.queue.length > 0) {
+              const nextTask = this.queue.shift();
+              nextTask();
+            }
+          }
+        };
+
+        if (this.activeCount < this.poolLimit) {
+          executeTask();
+        } else {
+          this.queue.push(executeTask);
+        }
+      });
+    }
+
+    /**
+     * Clears all pending tasks in the queue.
+     */
+    clearQueue() {
+      this.queue = [];
+    }
+
+    /**
+     * Returns the number of active and queued tasks.
+     * @returns {Object} - An object containing active and queued counts.
+     */
+    getStatus() {
+      return {
+        active: this.activeCount,
+        queued: this.queue.length,
+      };
+    }
+  }
+
+  // Network.js
+
   /**
    * Represents the network abstraction that manages peer-to-peer interactions.
    * This class extends the base Network class and handles peer selection, retries,
-   * and maintaining the routing table.
+   * and maintaining the routing table with throttled network calls.
    */
   class Network extends Network$1 {
     /**
@@ -2462,9 +2887,10 @@
      * @param {string} protocol - The protocol identifier.
      * @param {API} api - The API instance used for network requests.
      * @param {string[]} hosts - An array of bootstrap hosts to initialize the network.
+     * @param {number} concurrency - The maximum number of concurrent network calls.
      * @param {number} cacheSize - The maximum number of sets to keep in the cache.
      */
-    constructor(protocol, api, hosts, cacheSize = 100) {
+    constructor(protocol, api, hosts, concurrency = 50, cacheSize = 1000) {
       super();
 
       this._protocol = protocol;
@@ -2472,6 +2898,11 @@
       this._hosts = hosts;
       this._table = new Table();
       this._attempts = 3;
+
+      this._concurrency = concurrency;
+
+      // Initialize the throttler with the specified concurrency limit
+      this._throttler = new Throttler(this._concurrency);
 
       // Initialize the cache with a maximum size
       this._cache = new Map();
@@ -2481,6 +2912,10 @@
       this.discoverPeers();
     }
 
+    getConcurrency() {
+      return this._concurrency;
+    }
+
     /**
      * Initializes the network by searching for peers and populating the routing table.
      */
@@ -2488,9 +2923,9 @@
       try {
         const bootstraps = [];
 
-        // Use Promise.all to wait for all asynchronous operations
-        await Promise.all(
-          this._hosts.map(async (host) => {
+        // Wrap each pingPeer call with the throttler's enqueue method
+        const tasks = this._hosts.map((host) =>
+          this._throttler.enqueue(async () => {
             try {
               const [ip, port] = host.split("|");
               const peer = await this._api.pingPeer(this._protocol, ip, port);
@@ -2500,6 +2935,9 @@
             }
           })
         );
+
+        // Wait for all throttled pingPeer tasks to complete
+        await Promise.all(tasks);
 
         if (bootstraps.length === 0) {
           // If all attempts fail, throw an error
@@ -2536,14 +2974,17 @@
         }
 
         try {
-          await this._api.addItem(
-            this._protocol,
-            peer,
-            collection,
-            root,
-            location,
-            metrics,
-            reference
+          // Wrap the addItem API call with the throttler's enqueue method
+          await this._throttler.enqueue(() =>
+            this._api.addItem(
+              this._protocol,
+              peer,
+              collection,
+              root,
+              location,
+              metrics,
+              reference
+            )
           );
           return;
         } catch (error) {
@@ -2554,7 +2995,7 @@
           );
 
           attempts--;
-          if (attempts == 0) {
+          if (attempts === 0) {
             // If all attempts fail, throw an error
             throw new Error("Failed to add item after multiple attempts.");
           }
@@ -2597,11 +3038,9 @@
         }
 
         try {
-          const response = await this._api.getSet(
-            this._protocol,
-            peer,
-            collection,
-            location
+          // Wrap the getSet API call with the throttler's enqueue method
+          const response = await this._throttler.enqueue(() =>
+            this._api.getSet(this._protocol, peer, collection, location)
           );
 
           if (
@@ -2627,7 +3066,7 @@
           if (next === ROOT) {
             return [];
           }
-          next = parent(next);
+          next = parent$1(next);
         } catch (error) {
           // If the request fails, remove the peer from the table and retry
           this._table.remove(peer.id());
@@ -2636,7 +3075,7 @@
           );
 
           attempts--;
-          if (attempts == 0) {
+          if (attempts === 0) {
             // If all attempts fail, throw an error
             throw new Error("Failed to retrieve set after multiple attempts.");
           }
@@ -8787,20 +9226,18 @@
 
   exports.API = API;
   exports.Collection = Collection;
+  exports.Grid = Grid;
   exports.Item = Item$1;
   exports.Linear = Linear;
   exports.Local = Local;
   exports.Network = Network;
-  exports.OptionL = Option$1;
-  exports.OptionP = Option;
   exports.Peer = Peer;
-  exports.Progressive = Progressive;
   exports.Set = Set;
   exports.Space = Space;
   exports.Spherical = Spherical;
   exports.decodeUrl64 = decodeUrl64;
   exports.encodeUrl64 = encodeUrl64;
-  exports.parent = parent;
+  exports.parent = parent$1;
 
   Object.defineProperty(exports, '__esModule', { value: true });
 

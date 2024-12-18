@@ -1,12 +1,15 @@
+// Network.js
+
 import { Network as BaseNetwork, API } from "../model/index.js";
 import { Table } from "./table.js";
 import { Peer } from "./peer.js";
+import { Throttler } from "./throttler.js";
 import { decodeUrl64, parent, ROOT, transform } from "../utilities/encoding.js";
 
 /**
  * Represents the network abstraction that manages peer-to-peer interactions.
  * This class extends the base Network class and handles peer selection, retries,
- * and maintaining the routing table.
+ * and maintaining the routing table with throttled network calls.
  */
 class Network extends BaseNetwork {
   /**
@@ -14,9 +17,10 @@ class Network extends BaseNetwork {
    * @param {string} protocol - The protocol identifier.
    * @param {API} api - The API instance used for network requests.
    * @param {string[]} hosts - An array of bootstrap hosts to initialize the network.
+   * @param {number} concurrency - The maximum number of concurrent network calls.
    * @param {number} cacheSize - The maximum number of sets to keep in the cache.
    */
-  constructor(protocol, api, hosts, cacheSize = 100) {
+  constructor(protocol, api, hosts, concurrency = 50, cacheSize = 1000) {
     super();
 
     this._protocol = protocol;
@@ -24,6 +28,11 @@ class Network extends BaseNetwork {
     this._hosts = hosts;
     this._table = new Table();
     this._attempts = 3;
+
+    this._concurrency = concurrency;
+
+    // Initialize the throttler with the specified concurrency limit
+    this._throttler = new Throttler(this._concurrency);
 
     // Initialize the cache with a maximum size
     this._cache = new Map();
@@ -33,6 +42,10 @@ class Network extends BaseNetwork {
     this.discoverPeers();
   }
 
+  getConcurrency() {
+    return this._concurrency;
+  }
+
   /**
    * Initializes the network by searching for peers and populating the routing table.
    */
@@ -40,9 +53,9 @@ class Network extends BaseNetwork {
     try {
       const bootstraps = [];
 
-      // Use Promise.all to wait for all asynchronous operations
-      await Promise.all(
-        this._hosts.map(async (host) => {
+      // Wrap each pingPeer call with the throttler's enqueue method
+      const tasks = this._hosts.map((host) =>
+        this._throttler.enqueue(async () => {
           try {
             const [ip, port] = host.split("|");
             const peer = await this._api.pingPeer(this._protocol, ip, port);
@@ -52,6 +65,9 @@ class Network extends BaseNetwork {
           }
         })
       );
+
+      // Wait for all throttled pingPeer tasks to complete
+      await Promise.all(tasks);
 
       if (bootstraps.length === 0) {
         // If all attempts fail, throw an error
@@ -88,14 +104,17 @@ class Network extends BaseNetwork {
       }
 
       try {
-        await this._api.addItem(
-          this._protocol,
-          peer,
-          collection,
-          root,
-          location,
-          metrics,
-          reference
+        // Wrap the addItem API call with the throttler's enqueue method
+        await this._throttler.enqueue(() =>
+          this._api.addItem(
+            this._protocol,
+            peer,
+            collection,
+            root,
+            location,
+            metrics,
+            reference
+          )
         );
         return;
       } catch (error) {
@@ -106,7 +125,7 @@ class Network extends BaseNetwork {
         );
 
         attempts--;
-        if (attempts == 0) {
+        if (attempts === 0) {
           // If all attempts fail, throw an error
           throw new Error("Failed to add item after multiple attempts.");
         }
@@ -149,11 +168,9 @@ class Network extends BaseNetwork {
       }
 
       try {
-        const response = await this._api.getSet(
-          this._protocol,
-          peer,
-          collection,
-          location
+        // Wrap the getSet API call with the throttler's enqueue method
+        const response = await this._throttler.enqueue(() =>
+          this._api.getSet(this._protocol, peer, collection, location)
         );
 
         if (
@@ -188,7 +205,7 @@ class Network extends BaseNetwork {
         );
 
         attempts--;
-        if (attempts == 0) {
+        if (attempts === 0) {
           // If all attempts fail, throw an error
           throw new Error("Failed to retrieve set after multiple attempts.");
         }

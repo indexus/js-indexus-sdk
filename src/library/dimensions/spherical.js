@@ -88,8 +88,8 @@ class Spherical extends BaseDimension {
 
     this._name = name;
     this._ratio = this.pointDistance(
-      new Point(0, args[0]),
-      new Point(0, args[2])
+      new Point(args[0], args[2]),
+      new Point(args[1], args[3])
     );
     this._rootSegment = new Segment(args[0], args[1], args[2], args[3]);
   }
@@ -199,6 +199,26 @@ class Spherical extends BaseDimension {
     return new Direction(0, 0, 0, 0);
   }
 
+  segmentCenter(segment) {
+    return new Point(
+      (segment.south + segment.north) / 2,
+      (segment.west + segment.east) / 2
+    );
+  }
+
+  segmentExtension(segment, offset) {
+    const root = this._rootSegment;
+    const latStep = offset * (root.north - root.south);
+    const lngStep = offset * (root.east - root.west);
+
+    return new Segment(
+      this._normalizeLat(segment.south - latStep),
+      this._normalizeLat(segment.north + latStep),
+      this._normalizeLng(segment.west - lngStep),
+      this._normalizeLng(segment.east + lngStep)
+    );
+  }
+
   segmentLocation(point, segment) {
     if (
       segment.south === this._rootSegment.south &&
@@ -223,16 +243,10 @@ class Spherical extends BaseDimension {
       return false;
     }
 
-    const normalizeLng = (lng) => {
-      while (lng < -180) lng += 360;
-      while (lng >= 180) lng -= 360;
-      return lng;
-    };
-
-    const aWest = normalizeLng(segment1.west);
-    const aEast = normalizeLng(segment1.east);
-    const bWest = normalizeLng(segment2.west);
-    const bEast = normalizeLng(segment2.east);
+    const aWest = this._normalizeLng(segment1.west);
+    const aEast = this._normalizeLng(segment1.east);
+    const bWest = this._normalizeLng(segment2.west);
+    const bEast = this._normalizeLng(segment2.east);
 
     const lngOverlap = (west1, east1, west2, east2) => {
       const wraps = (west, east) => west > east;
@@ -299,6 +313,22 @@ class Spherical extends BaseDimension {
       );
     }
     return true;
+  }
+
+  _normalizeLat(lat) {
+    if (lat > 90) {
+      return 90;
+    }
+    if (lat < -90) {
+      return -90;
+    }
+    return lat;
+  }
+
+  _normalizeLng(lng) {
+    while (lng < -180) lng += 360;
+    while (lng > 180) lng -= 360;
+    return lng;
   }
 }
 

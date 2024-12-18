@@ -2,9 +2,15 @@ import { ROOT, BASEURL64, decodeUrl64 } from "../utilities/encoding.js";
 
 class Space {
   constructor(dimensions, mask, offset) {
+    const size = dimensions.reduce((total, dimension) => {
+      return total + dimension.pointLength();
+    }, 0);
+
     this.dimensions = dimensions;
     this.mask = mask;
     this.offset = offset;
+    this.size = size;
+    this.step = 6 / size; // BASE64 = 2^6
   }
 
   signature() {
@@ -13,10 +19,6 @@ class Space {
 
   dimension(i) {
     return this.dimensions[i];
-  }
-
-  size() {
-    return this.dimensions.length;
   }
 
   newPoint(coordinates) {
@@ -44,8 +46,32 @@ class Space {
     return this._coordinatesToSegments(this._decode(hash));
   }
 
+  xyz(hash) {
+    return this._xyz(hash);
+  }
+
+  bounds(zoom, xyz) {
+    return this._coordinatesToSegments(this._bounds(zoom, xyz));
+  }
+
+  center(segments) {
+    return this.dimensions.map((dimension, i) =>
+      dimension.segmentCenter(segments[i])
+    );
+  }
+
+  extend(segments, offset) {
+    return this.dimensions.map((dimension, i) =>
+      dimension.segmentExtension(segments[i], offset)
+    );
+  }
+
   points(bounds) {
     return this._boundsToPoints(bounds);
+  }
+
+  root() {
+    return this._coordinatesToSegments(this._root());
   }
 
   overlap(bounds, segments) {
@@ -128,6 +154,57 @@ class Space {
     return src;
   }
 
+  _xyz(hash) {
+    let coordinates = [];
+    let resolution = 0;
+
+    for (let i = 0; i < this._root().length / 2; i++) {
+      coordinates[i] = 0;
+    }
+
+    if (hash === ROOT) {
+      return { coordinates, resolution };
+    }
+
+    for (let l = 0; l < hash.length; l++) {
+      const idx = (64 + BASEURL64.indexOf(hash[l]) - this.offset.at(l)) % 64;
+      for (let n = 0; n <= 5; n++) {
+        const maskIndex = this.mask.at(l, n);
+        coordinates[maskIndex] *= 2;
+        resolution++;
+        if (((idx >> (5 - n)) & 1) === 1) {
+          coordinates[maskIndex] += 1;
+        }
+      }
+    }
+
+    resolution /= coordinates.length;
+
+    return { resolution, coordinates };
+  }
+
+  _bounds(xyz) {
+    const bounds = [];
+    const size = Math.pow(2, xyz.resolution);
+
+    let idx = 0;
+    for (let i = 0; i < this.dimensions.length; i++) {
+      for (let j = 0; j < this.dimensions[i].segmentLength() / 2; j++) {
+        const min = this._root()[idx * 2];
+        const max = this._root()[idx * 2 + 1];
+
+        const step = (max - min) / size;
+
+        bounds[idx * 2] = xyz.coordinates[idx] * step + min;
+        bounds[idx * 2 + 1] = (xyz.coordinates[idx] + 1) * step + min;
+
+        idx++;
+      }
+    }
+
+    return bounds;
+  }
+
   _coordinatesToPoints(coordinates) {
     const origin = [];
     for (let i = 0; i < this.dimensions.length; i++) {
@@ -174,20 +251,18 @@ class Space {
 
     this.dimensions.forEach((dimension, i) => {
       const tmp = [];
+      const points = bounds[i].points();
 
-      dimension
-        .newSegment(bounds[i])
-        .points()
-        .forEach((point) => {
-          if (i === 0) {
-            tmp.push(point.value());
-            return;
-          }
+      points.forEach((point) => {
+        if (i === 0) {
+          tmp.push(point.value());
+          return;
+        }
 
-          coordinates.forEach((coordinate) => {
-            tmp.push([coordinate, point.value()]);
-          });
+        coordinates.forEach((coordinate) => {
+          tmp.push([coordinate, point.value()]);
         });
+      });
 
       coordinates = tmp;
     });

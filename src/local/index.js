@@ -5,22 +5,13 @@ import { Space } from "../entities/space.js";
 import { Set } from "../entities/set.js";
 
 import { run, prepare, query, stream } from "./exploration.js";
-import { addItem, getSet, addLocation } from "./observer.js";
+import { getSet, addLocation } from "./observer.js";
 import { ROOT } from "../utilities/encoding.js";
 
-class Option {
-  constructor(origin, filters, concurrency, cap, step) {
-    this.origin = origin;
-    this.filters = filters;
-    this.concurrency = concurrency;
-    this.cap = cap;
-    this.step = step;
-  }
-}
 class Local {
-  constructor(spaces, option, output, monitoring, network) {
+  constructor(spaces, options, output, monitoring, network) {
     this.spaces = spaces;
-    this.option = option;
+    this.options = options;
     this.limit = 0;
     this.level = 0;
     this.sets = [new Layer()];
@@ -49,7 +40,7 @@ class Local {
     const dimensions = {};
     for (const key in this.spaces) {
       const space = this.spaces[key];
-      for (let i = 0; i < space.size(); i++) {
+      for (let i = 0; i < space.dimensions.length; i++) {
         const dimension = space.dimension(i);
         dimensions[dimension.name()] = dimension;
       }
@@ -58,7 +49,7 @@ class Local {
   }
 
   async search() {
-    this.limit += this.option.step;
+    this.limit += this.options.step;
     await this.run();
   }
 
@@ -89,8 +80,7 @@ Local.prototype.run = run;
 Local.prototype.prepare = prepare;
 Local.prototype.query = query;
 Local.prototype.stream = stream;
-Local.prototype.addItem = addItem;
 Local.prototype.getSet = getSet;
 Local.prototype.addLocation = addLocation;
 
-export { Option, Local };
+export { Local };
