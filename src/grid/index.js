@@ -15,8 +15,6 @@ import {
 } from "./data.js";
 import { aggregate } from "./aggregation.js";
 
-import { Locker } from "../utilities/locker.js";
-
 class Grid {
   constructor(collection, space, options, monitoring, network) {
     this.collection = collection;
@@ -27,14 +25,13 @@ class Grid {
     this.monitoring = monitoring;
     this.network = network;
     this.root = new Set(collection, "@", undefined, undefined);
-    this.lock = new Locker();
   }
 
   async init() {
     await this.refresh([this.root], this.space.root(), 0);
   }
 
-  async display(zoom, bounds) {
+  move(zoom, bounds) {
     this.preload = this.prepare(zoom, bounds);
 
     if (this.preload.delta) {
@@ -42,18 +39,15 @@ class Grid {
 
       this.refresh([this.root], this.preload.extended, this.preload.depth);
     }
+  }
 
-    await this.lock.acquireRead();
+  display(zoom, bounds) {
+    const result = [];
+    const xyz = this.space.xyz(this.root._hash);
 
-    let data;
+    this.retrieve(result, zoom, bounds, xyz);
 
-    try {
-      data = this.retrieve(zoom, bounds);
-    } finally {
-      this.lock.releaseRead();
-    }
-
-    return data; // this.aggregate(data);
+    return result;
   }
 }
 

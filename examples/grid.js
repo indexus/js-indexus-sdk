@@ -17,8 +17,6 @@ const network = new Network("http", new API(), ["127.0.0.1|21001"]);
 
 const grid = new Grid(collection, space, options, monitoring, network);
 
-await grid.init();
-
 const bounds = [
   space.dimension(0).newSegment([45, 46, 2, 3]),
   space
@@ -29,9 +27,13 @@ const bounds = [
     ]),
 ];
 
+await grid.init();
+
 for (let i = 0; i < 14; i++) {
-  const data = await grid.display(i, bounds);
-  console.log(i, data);
+  grid.move(i, bounds);
+
+  const data = grid.display(i, bounds);
+  console.log(i, data.length);
 
   await new Promise((r) => setTimeout(r, 200));
 }

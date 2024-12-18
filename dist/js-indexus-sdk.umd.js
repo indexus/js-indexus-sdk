@@ -2395,13 +2395,7 @@
       }
     });
 
-    await this.lock.acquireWrite();
-
-    try {
-      this.set(elements);
-    } finally {
-      this.lock.releaseWrite();
-    }
+    this.set(elements);
   }
 
   function consolidate(merged, length, elm) {
@@ -2516,29 +2510,21 @@
     parent.children.push(element.xyz);
   }
 
-  function retrieve(resolution, bounds) {
-    const result = [];
+  function retrieve(result, resolution, bounds, xyz) {
+    const element = this.get(xyz);
 
-    const traverse = (xyz) => {
-      const element = this.get(xyz);
+    if (!this.space.overlap(bounds, element.bounds)) {
+      return;
+    }
 
-      if (!this.space.overlap(bounds, element.bounds)) {
-        return;
-      }
+    if (!element.children.length || element.xyz.resolution === resolution) {
+      result.push(element);
+      return;
+    }
 
-      if (!element.children.length || element.xyz.resolution === resolution) {
-        result.push(element);
-        return;
-      }
-
-      element.children.forEach((child) => {
-        traverse(child);
-      });
-    };
-
-    traverse(this.space.xyz(this.root._hash));
-
-    return result;
+    element.children.forEach((child) => {
+      this.retrieve(result, resolution, bounds, child);
+    });
   }
 
   function aggregate(data) {
@@ -2587,66 +2573,6 @@
     return results;
   }
 
-  // locker.js
-  class Locker {
-    constructor() {
-      this.readers = 0;
-      this.writer = false;
-      this.readQueue = [];
-      this.writeQueue = [];
-    }
-
-    async acquireRead() {
-      return new Promise((resolve) => {
-        if (!this.writer && this.writeQueue.length === 0) {
-          this.readers++;
-          resolve();
-        } else {
-          this.readQueue.push(resolve);
-        }
-      });
-    }
-
-    releaseRead() {
-      this.readers--;
-      this._next();
-    }
-
-    async acquireWrite() {
-      return new Promise((resolve) => {
-        if (!this.writer && this.readers === 0) {
-          this.writer = true;
-          resolve();
-        } else {
-          this.writeQueue.push(resolve);
-        }
-      });
-    }
-
-    releaseWrite() {
-      this.writer = false;
-      this._next();
-    }
-
-    _next() {
-      if (this.writeQueue.length > 0 && this.readers === 0 && !this.writer) {
-        this.writer = true;
-        const resolve = this.writeQueue.shift();
-        resolve();
-      } else {
-        while (
-          this.readQueue.length > 0 &&
-          !this.writer &&
-          this.writeQueue.length === 0
-        ) {
-          this.readers++;
-          const resolve = this.readQueue.shift();
-          resolve();
-        }
-      }
-    }
-  }
-
   class Grid {
     constructor(collection, space, options, monitoring, network) {
       this.collection = collection;
@@ -2657,14 +2583,13 @@
       this.monitoring = monitoring;
       this.network = network;
       this.root = new Set(collection, "@", undefined, undefined);
-      this.lock = new Locker();
     }
 
     async init() {
       await this.refresh([this.root], this.space.root(), 0);
     }
 
-    async display(zoom, bounds) {
+    move(zoom, bounds) {
       this.preload = this.prepare(zoom, bounds);
 
       if (this.preload.delta) {
@@ -2672,18 +2597,15 @@
 
         this.refresh([this.root], this.preload.extended, this.preload.depth);
       }
+    }
 
-      await this.lock.acquireRead();
+    display(zoom, bounds) {
+      const result = [];
+      const xyz = this.space.xyz(this.root._hash);
 
-      let data;
+      this.retrieve(result, zoom, bounds, xyz);
 
-      try {
-        data = this.retrieve(zoom, bounds);
-      } finally {
-        this.lock.releaseRead();
-      }
-
-      return data; // this.aggregate(data);
+      return result;
     }
   }
 

@@ -88,27 +88,19 @@ export function merge(parents, element) {
   parent.children.push(element.xyz);
 }
 
-export function retrieve(resolution, bounds) {
-  const result = [];
+export function retrieve(result, resolution, bounds, xyz) {
+  const element = this.get(xyz);
 
-  const traverse = (xyz) => {
-    const element = this.get(xyz);
+  if (!this.space.overlap(bounds, element.bounds)) {
+    return;
+  }
 
-    if (!this.space.overlap(bounds, element.bounds)) {
-      return;
-    }
+  if (!element.children.length || element.xyz.resolution === resolution) {
+    result.push(element);
+    return;
+  }
 
-    if (!element.children.length || element.xyz.resolution === resolution) {
-      result.push(element);
-      return;
-    }
-
-    element.children.forEach((child) => {
-      traverse(child);
-    });
-  };
-
-  traverse(this.space.xyz(this.root._hash));
-
-  return result;
+  element.children.forEach((child) => {
+    this.retrieve(result, resolution, bounds, child);
+  });
 }
