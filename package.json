@@ -1,6 +1,6 @@
 {
   "name": "js-indexus-sdk",
-  "version": "1.0.34",
+  "version": "1.0.35",
   "description": "A powerful toolkit for decentralized, peer-to-peer networks.",
   "main": "dist/js-indexus-sdk.cjs.js",
   "module": "dist/js-indexus-sdk.esm.js",
@@ -12,7 +12,9 @@
   "scripts": {
     "build": "rollup -c",
     "test": "echo \"No tests specified\" && exit 0",
-    "start": "babel-node main.js"
+    "add": "babel-node examples/add.js",
+    "local": "babel-node examples/local.js",
+    "grid": "babel-node examples/grid.js"
   },
   "peerDependencies": {
     "axios": "^1.4.0"

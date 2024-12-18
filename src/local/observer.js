@@ -1,20 +1,6 @@
 import { ROOT } from "../utilities/encoding.js";
 import { Item, Monitoring, State } from "../model/index.js";
 
-export async function addItem(item) {
-  if (item instanceof Item) {
-    await this.network.addItem(
-      item.collection(),
-      ROOT,
-      item.hash(),
-      item.metrics(),
-      item.id()
-    );
-
-    this.monitoring.send(new Monitoring(this.level + 1, State.Added, item));
-  }
-}
-
 export async function getSet(set, addSet) {
   if (set instanceof Item) {
     addSet(set);
@@ -54,22 +40,24 @@ export function addLocation(space, element) {
     location.push(segment);
 
     const dimension = space.dimension(i);
-    const option = this.option[dimension.name()];
+    const origin = this.options.origins[dimension.name()];
+    const filter = this.options.filters[dimension.name()];
 
-    const distance = dimension.segmentDistance(option.origin, segment);
+    const distance = dimension.segmentDistance(origin, segment);
     distances.push(distance);
 
-    const direction = dimension.segmentDirection(option.origin, segment);
+    const direction = dimension.segmentDirection(origin, segment);
     directions.push(direction);
 
     overall += distance / dimension.ratio() / segments.length;
 
     active =
       active &&
-      dimension.filterDirection(option.filters, direction) &&
-      dimension.filterDistance(option.filters, distance);
+      dimension.filterDirection(filter, direction) &&
+      dimension.filterDistance(filter, distance);
   }
 
   element.locate(location, distances, directions, overall);
+
   return active;
 }
