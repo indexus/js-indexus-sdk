@@ -103,13 +103,7 @@ export async function process(selected, bounds, element) {
     }
   });
 
-  await this.lock.acquireWrite();
-
-  try {
-    this.set(elements);
-  } finally {
-    this.lock.releaseWrite();
-  }
+  this.set(elements);
 }
 
 export function consolidate(merged, length, elm) {
