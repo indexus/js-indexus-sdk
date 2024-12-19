@@ -32,7 +32,7 @@ export function parent(xyz) {
   }
   return {
     resolution: xyz.resolution - 1,
-    coordinates: xyz.coordinates.map((v) => Math.floor(v / this.n)),
+    coordinates: xyz.coordinates.map((v) => Math.floor(v / 2)),
   };
 }
 
@@ -88,19 +88,18 @@ export function merge(parents, element) {
   parent.children.push(element.xyz);
 }
 
-export function retrieve(result, resolution, bounds, xyz) {
+export function retrieve(resolution, bounds, xyz) {
   const element = this.get(xyz);
 
   if (!this.space.overlap(bounds, element.bounds)) {
-    return;
+    return [];
   }
 
   if (!element.children.length || element.xyz.resolution === resolution) {
-    result.push(element);
-    return;
+    return [element];
   }
 
-  element.children.forEach((child) => {
-    this.retrieve(result, resolution, bounds, child);
-  });
+  return element.children.reduce((accumulator, child) => {
+    return accumulator.concat(this.retrieve(resolution, bounds, child));
+  }, []);
 }

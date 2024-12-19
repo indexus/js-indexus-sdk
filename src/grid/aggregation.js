@@ -1,45 +1,42 @@
 export function aggregate(data) {
-  if (!data.length) return [];
+  if (!data.length) return;
 
-  const numBounds = data[0]._bounds.length;
-  const results = [];
+  const result = [];
 
-  for (let i = 0; i < numBounds; i++) {
+  let min = 0,
+    max = 0;
+
+  this.space.dimensions.forEach((dimension, i) => {
     const groups = new Map();
 
-    data.forEach((item) => {
-      const key = JSON.stringify(item._bounds[i]);
+    min = max;
+    max += dimension.pointLength();
+
+    data.forEach((elm) => {
+      const key = [
+        elm.xyz.resolution,
+        ...elm.xyz.coordinates.slice(min, max),
+      ].join("-");
 
       if (!groups.has(key)) {
         groups.set(key, {
-          _hash: [],
-          _count: 0,
-          _metrics: Array(item._metrics.length).fill(0),
-          _bounds: [],
-          groupBound: item._bounds[i],
+          bounds: elm.bounds[i],
+          count: 0,
+          metrics: Array(elm.metrics.length).fill(0),
         });
       }
 
       const group = groups.get(key);
-      group._hash.push(item._hash);
-      group._count += item._count;
-      item._metrics.forEach((m, idx) => {
-        group._metrics[idx] += m;
+      group.count += elm.count;
+      elm.metrics.forEach((m, idx) => {
+        group.metrics[idx] += m;
       });
-      const otherBound = item._bounds.filter((_, idx) => idx !== i)[0];
-      group._bounds.push(otherBound);
     });
 
-    const aggregated = Array.from(groups.values()).map((g) => ({
-      _hash: g._hash,
-      _count: g._count,
-      _metrics: g._metrics,
-      _bounds: g._bounds,
-      groupBound: g.groupBound,
-    }));
+    const aggregated = Array.from(groups.values()).map((g) => g);
 
-    results.push(aggregated);
-  }
+    result.push(aggregated);
+  });
 
-  return results;
+  return result;
 }
