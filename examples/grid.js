@@ -1,9 +1,10 @@
-import { spaces } from "./spaces.js";
+import { spaces, bounds } from "./spaces.js";
 import { Grid, Network, API } from "../src/index.js";
 
-const collection = "DENjYsMTAyLDE2MCwxMjYsPjQ5L";
+const collection = "DENjYsMTAyLDE2MEwxMjYsPjQ5L";
 
 const space = spaces[collection];
+const bound = bounds[collection];
 
 const options = {
   offset: 1,
@@ -17,22 +18,12 @@ const network = new Network("http", new API(), ["127.0.0.1|21001"]);
 
 const grid = new Grid(collection, space, options, monitoring, network);
 
-const bounds = [
-  space.dimension(0).newSegment([45, 46, 2, 3]),
-  space
-    .dimension(1)
-    .newSegment([
-      new Date("2019-11-01").getTime() / 1000,
-      new Date("2019-12-01").getTime() / 1000,
-    ]),
-];
-
 await grid.init();
 
 for (let i = 0; i < 11; i++) {
-  grid.move(i, bounds);
+  grid.move(i, bound);
 
-  const data = grid.display(i, bounds);
+  const data = grid.display(i, bound);
 
   console.log(i, data.raw.length, data.aggregated[0].length);
 
