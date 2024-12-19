@@ -2452,7 +2452,7 @@ function parent(xyz) {
   }
   return {
     resolution: xyz.resolution - 1,
-    coordinates: xyz.coordinates.map((v) => Math.floor(v / this.n)),
+    coordinates: xyz.coordinates.map((v) => Math.floor(v / 2)),
   };
 }
 
@@ -2508,79 +2508,76 @@ function merge$1(parents, element) {
   parent.children.push(element.xyz);
 }
 
-function retrieve(result, resolution, bounds, xyz) {
+function retrieve(resolution, bounds, xyz) {
   const element = this.get(xyz);
 
   if (!this.space.overlap(bounds, element.bounds)) {
-    return;
+    return [];
   }
 
   if (!element.children.length || element.xyz.resolution === resolution) {
-    result.push(element);
-    return;
+    return [element];
   }
 
-  element.children.forEach((child) => {
-    this.retrieve(result, resolution, bounds, child);
-  });
+  return element.children.reduce((accumulator, child) => {
+    return accumulator.concat(this.retrieve(resolution, bounds, child));
+  }, []);
 }
 
 function aggregate(data) {
-  if (!data.length) return [];
+  if (!data.length) return;
 
-  const numBounds = data[0]._bounds.length;
-  const results = [];
+  const result = [];
 
-  for (let i = 0; i < numBounds; i++) {
+  let min = 0,
+    max = 0;
+
+  this.space.dimensions.forEach((dimension, i) => {
     const groups = new Map();
 
-    data.forEach((item) => {
-      const key = JSON.stringify(item._bounds[i]);
+    min = max;
+    max += dimension.pointLength();
+
+    data.forEach((elm) => {
+      const key = [
+        elm.xyz.resolution,
+        ...elm.xyz.coordinates.slice(min, max),
+      ].join("-");
 
       if (!groups.has(key)) {
         groups.set(key, {
-          _hash: [],
-          _count: 0,
-          _metrics: Array(item._metrics.length).fill(0),
-          _bounds: [],
-          groupBound: item._bounds[i],
+          bounds: elm.bounds[i],
+          count: 0,
+          metrics: Array(elm.metrics.length).fill(0),
         });
       }
 
       const group = groups.get(key);
-      group._hash.push(item._hash);
-      group._count += item._count;
-      item._metrics.forEach((m, idx) => {
-        group._metrics[idx] += m;
+      group.count += elm.count;
+      elm.metrics.forEach((m, idx) => {
+        group.metrics[idx] += m;
       });
-      const otherBound = item._bounds.filter((_, idx) => idx !== i)[0];
-      group._bounds.push(otherBound);
     });
 
-    const aggregated = Array.from(groups.values()).map((g) => ({
-      _hash: g._hash,
-      _count: g._count,
-      _metrics: g._metrics,
-      _bounds: g._bounds,
-      groupBound: g.groupBound,
-    }));
+    const aggregated = Array.from(groups.values()).map((g) => g);
 
-    results.push(aggregated);
-  }
+    result.push(aggregated);
+  });
 
-  return results;
+  return result;
 }
 
 class Grid {
   constructor(collection, space, options, monitoring, network) {
     this.collection = collection;
     this.space = space;
-    this.n = 2;
     this.data = {};
     this.options = options;
     this.monitoring = monitoring;
     this.network = network;
+
     this.root = new Set(collection, "@", undefined, undefined);
+    this.rootXyz = this.space.xyz("@");
   }
 
   async init() {
@@ -2598,12 +2595,13 @@ class Grid {
   }
 
   display(zoom, bounds) {
-    const result = [];
-    const xyz = this.space.xyz(this.root._hash);
+    const raw = this.retrieve(zoom, bounds, this.rootXyz);
+    const aggregated = this.aggregate(raw);
 
-    this.retrieve(result, zoom, bounds, xyz);
-
-    return result;
+    return {
+      raw,
+      aggregated,
+    };
   }
 }
 

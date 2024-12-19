@@ -29,11 +29,12 @@ const bounds = [
 
 await grid.init();
 
-for (let i = 0; i < 14; i++) {
+for (let i = 0; i < 11; i++) {
   grid.move(i, bounds);
 
   const data = grid.display(i, bounds);
-  console.log(i, data.length);
+
+  console.log(i, data.raw.length, data.aggregated[0].length);
 
   await new Promise((r) => setTimeout(r, 200));
 }

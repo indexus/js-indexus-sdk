@@ -19,12 +19,13 @@ class Grid {
   constructor(collection, space, options, monitoring, network) {
     this.collection = collection;
     this.space = space;
-    this.n = 2;
     this.data = {};
     this.options = options;
     this.monitoring = monitoring;
     this.network = network;
+
     this.root = new Set(collection, "@", undefined, undefined);
+    this.rootXyz = this.space.xyz("@");
   }
 
   async init() {
@@ -42,12 +43,13 @@ class Grid {
   }
 
   display(zoom, bounds) {
-    const result = [];
-    const xyz = this.space.xyz(this.root._hash);
+    const raw = this.retrieve(zoom, bounds, this.rootXyz);
+    const aggregated = this.aggregate(raw);
 
-    this.retrieve(result, zoom, bounds, xyz);
-
-    return result;
+    return {
+      raw,
+      aggregated,
+    };
   }
 }
 
