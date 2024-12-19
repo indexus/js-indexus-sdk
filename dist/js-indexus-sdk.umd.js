@@ -2541,13 +2541,15 @@
       max += dimension.pointLength();
 
       data.forEach((elm) => {
-        const key = [
-          elm.xyz.resolution,
-          ...elm.xyz.coordinates.slice(min, max),
-        ].join("-");
+        const xyz = {
+          resolution: elm.xyz.resolution,
+          coordinates: elm.xyz.coordinates.slice(min, max),
+        };
+        const key = this.key(xyz);
 
         if (!groups.has(key)) {
           groups.set(key, {
+            xyz: xyz,
             bounds: elm.bounds[i],
             count: 0,
             metrics: Array(elm.metrics.length).fill(0),
