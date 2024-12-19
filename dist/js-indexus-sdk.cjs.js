@@ -2458,26 +2458,24 @@ function parent(xyz) {
 
 function set(elements) {
   const parents = {};
+  let keep = elements.length;
 
-  if (elements.length === 1) {
-    const element = elements[0];
+  elements.forEach((element) => {
     const existing = this.get(element.xyz);
 
     if (existing) {
-      this.add(element);
-      return;
+      keep--;
     }
-    // TODO FIX Parent
-  }
 
-  elements.forEach((element) => {
-    this.add(element);
+    if (!existing || existing.children.length === 0) {
+      this.add(element);
+    }
+
     this.merge(parents, element);
   });
 
-  const sets = Object.values(parents);
-  if (sets.length) {
-    this.set(sets);
+  if (keep) {
+    this.set(Object.values(parents));
   }
 }
 
