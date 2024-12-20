@@ -2581,7 +2581,7 @@ class Grid {
   }
 
   move(zoom, bounds) {
-    this.preload = this.prepare(zoom, bounds);
+    this.preload = this.prepare(zoom + this.options.resolution, bounds);
 
     if (this.preload.delta) {
       this.preload.delta = false;
@@ -2591,7 +2591,11 @@ class Grid {
   }
 
   display(zoom, bounds) {
-    const raw = this.retrieve(zoom, bounds, this.rootXyz);
+    const raw = this.retrieve(
+      zoom + this.options.resolution,
+      bounds,
+      this.rootXyz
+    );
     const aggregated = this.aggregate(raw);
 
     return {
