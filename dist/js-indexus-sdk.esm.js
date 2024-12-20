@@ -2555,9 +2555,7 @@ function aggregate(data) {
       });
     });
 
-    const aggregated = Array.from(groups.values()).map((g) => g);
-
-    result.push(aggregated);
+    result.push(groups);
   });
 
   return result;
