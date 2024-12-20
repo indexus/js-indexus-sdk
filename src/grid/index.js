@@ -9,8 +9,10 @@ import {
   get,
   key,
   parent,
+  children,
   merge,
   set,
+  generate,
   retrieve,
 } from "./data.js";
 import { aggregate } from "./aggregation.js";
@@ -43,11 +45,12 @@ class Grid {
   }
 
   display(zoom, bounds) {
-    const raw = this.retrieve(
-      zoom + this.options.resolution,
-      bounds,
-      this.rootXyz
-    );
+    const resolution = zoom + this.options.resolution;
+
+    const raw = !this.options.full
+      ? this.retrieve(resolution, bounds, this.rootXyz)
+      : this.generate(resolution, bounds, null, this.rootXyz);
+
     const aggregated = this.aggregate(raw);
 
     return {
@@ -68,9 +71,11 @@ Grid.prototype.add = add;
 Grid.prototype.get = get;
 Grid.prototype.key = key;
 Grid.prototype.parent = parent;
+Grid.prototype.children = children;
 Grid.prototype.set = set;
 Grid.prototype.merge = merge;
 Grid.prototype.retrieve = retrieve;
+Grid.prototype.generate = generate;
 
 Grid.prototype.aggregate = aggregate;
 

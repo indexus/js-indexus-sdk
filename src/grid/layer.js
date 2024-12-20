@@ -63,7 +63,7 @@ export async function process(selected, bounds, element) {
 
   set.forEach((elm) => {
     if (elm instanceof Item) {
-      this.consolidate(merged, length + 1, elm);
+      // this.consolidate(merged, length + 1, elm);
       return;
     }
 

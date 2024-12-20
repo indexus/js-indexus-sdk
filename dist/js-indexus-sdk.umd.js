@@ -2338,7 +2338,7 @@
   async function process(selected, bounds, element) {
     const collection = element._collection;
     const hash = element._hash;
-    const length = hash === ROOT ? 0 : hash.length;
+    hash === ROOT ? 0 : hash.length;
 
     let set = element._items;
 
@@ -2355,7 +2355,7 @@
 
     set.forEach((elm) => {
       if (elm instanceof Item$1) {
-        this.consolidate(merged, length + 1, elm);
+        // this.consolidate(merged, length + 1, elm);
         return;
       }
 
@@ -2458,6 +2458,29 @@
     };
   }
 
+  function children(xyz) {
+    const resolution = xyz.resolution + 1;
+    const coordinates = xyz.coordinates;
+    const children = [];
+
+    const fill = (idx, current) => {
+      if (idx === coordinates.length) {
+        children.push({
+          resolution,
+          coordinates: current,
+        });
+        return;
+      }
+
+      fill(idx + 1, current.concat(coordinates[idx] * 2));
+      fill(idx + 1, current.concat(coordinates[idx] * 2 + 1));
+    };
+
+    fill(0, []);
+
+    return children;
+  }
+
   function set(elements) {
     const parents = {};
     let keep = elements.length;
@@ -2521,6 +2544,35 @@
 
     return element.children.reduce((accumulator, child) => {
       return accumulator.concat(this.retrieve(resolution, bounds, child));
+    }, []);
+  }
+
+  function generate(resolution, bounds, parent, xyz) {
+    let element = this.get(xyz);
+
+    if (!element) {
+      element = { ...parent };
+      element.xyz = xyz;
+      element.bounds = this.space.bounds(xyz);
+      element.fake = true;
+    }
+
+    if (!this.space.overlap(bounds, element.bounds)) {
+      return [];
+    }
+
+    if (
+      element.fake ||
+      !element.children.length ||
+      element.xyz.resolution === resolution
+    ) {
+      return [element];
+    }
+
+    return this.children(element.xyz).reduce((accumulator, child) => {
+      return accumulator.concat(
+        this.generate(resolution, bounds, element, child)
+      );
     }, []);
   }
 
@@ -2595,11 +2647,12 @@
     }
 
     display(zoom, bounds) {
-      const raw = this.retrieve(
-        zoom + this.options.resolution,
-        bounds,
-        this.rootXyz
-      );
+      const resolution = zoom + this.options.resolution;
+
+      const raw = !this.options.full
+        ? this.retrieve(resolution, bounds, this.rootXyz)
+        : this.generate(resolution, bounds, null, this.rootXyz);
+
       const aggregated = this.aggregate(raw);
 
       return {
@@ -2620,9 +2673,11 @@
   Grid.prototype.get = get;
   Grid.prototype.key = key;
   Grid.prototype.parent = parent;
+  Grid.prototype.children = children;
   Grid.prototype.set = set;
   Grid.prototype.merge = merge$1;
   Grid.prototype.retrieve = retrieve;
+  Grid.prototype.generate = generate;
 
   Grid.prototype.aggregate = aggregate;
 
