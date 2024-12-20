@@ -7,7 +7,9 @@ const space = spaces[collection];
 const bound = bounds[collection];
 
 const options = {
-  offset: 1,
+  offset: 0.5,
+  resolution: 3,
+  full: true,
 };
 
 const monitoring = {
@@ -25,7 +27,7 @@ for (let i = 0; i < 11; i++) {
 
   const data = grid.display(i, bound);
 
-  console.log(i, data.raw.length, data.aggregated[0].length);
+  console.log(i, data.raw.length);
 
   await new Promise((r) => setTimeout(r, 200));
 }

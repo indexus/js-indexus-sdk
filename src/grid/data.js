@@ -36,6 +36,29 @@ export function parent(xyz) {
   };
 }
 
+export function children(xyz) {
+  const resolution = xyz.resolution + 1;
+  const coordinates = xyz.coordinates;
+  const children = [];
+
+  const fill = (idx, current) => {
+    if (idx === coordinates.length) {
+      children.push({
+        resolution,
+        coordinates: current,
+      });
+      return;
+    }
+
+    fill(idx + 1, current.concat(coordinates[idx] * 2));
+    fill(idx + 1, current.concat(coordinates[idx] * 2 + 1));
+  };
+
+  fill(0, []);
+
+  return children;
+}
+
 export function set(elements) {
   const parents = {};
   let keep = elements.length;
@@ -99,5 +122,34 @@ export function retrieve(resolution, bounds, xyz) {
 
   return element.children.reduce((accumulator, child) => {
     return accumulator.concat(this.retrieve(resolution, bounds, child));
+  }, []);
+}
+
+export function generate(resolution, bounds, parent, xyz) {
+  let element = this.get(xyz);
+
+  if (!element) {
+    element = { ...parent };
+    element.xyz = xyz;
+    element.bounds = this.space.bounds(xyz);
+    element.fake = true;
+  }
+
+  if (!this.space.overlap(bounds, element.bounds)) {
+    return [];
+  }
+
+  if (
+    element.fake ||
+    !element.children.length ||
+    element.xyz.resolution === resolution
+  ) {
+    return [element];
+  }
+
+  return this.children(element.xyz).reduce((accumulator, child) => {
+    return accumulator.concat(
+      this.generate(resolution, bounds, element, child)
+    );
   }, []);
 }
