@@ -7,8 +7,8 @@ const space = spaces[collection];
 const bound = bounds[collection];
 
 const options = {
-  offset: 0.5,
-  resolution: 3,
+  offset: 1,
+  resolution: 0,
   full: true,
 };
 
@@ -22,12 +22,12 @@ const grid = new Grid(collection, space, options, monitoring, network);
 
 await grid.init();
 
-for (let i = 0; i < 11; i++) {
+for (let i = 0; i < 5; i++) {
   grid.move(i, bound);
 
   const data = grid.display(i, bound);
 
-  console.log(i, data.raw.length);
+  console.log(i, data.aggregated);
 
   await new Promise((r) => setTimeout(r, 200));
 }
