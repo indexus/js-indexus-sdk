@@ -2332,7 +2332,7 @@ async function refresh(list, bounds, depth) {
 async function process(selected, bounds, element) {
   const collection = element._collection;
   const hash = element._hash;
-  hash === ROOT ? 0 : hash.length;
+  const length = hash === ROOT ? 0 : hash.length;
 
   let set = element._items;
 
@@ -2349,7 +2349,7 @@ async function process(selected, bounds, element) {
 
   set.forEach((elm) => {
     if (elm instanceof Item$1) {
-      // this.consolidate(merged, length + 1, elm);
+      this.consolidate(merged, length + 1, elm);
       return;
     }
 
@@ -2532,7 +2532,11 @@ function retrieve(resolution, bounds, xyz) {
     return [];
   }
 
-  if (!element.children.length || element.xyz.resolution === resolution) {
+  if (
+    element.count <= this.options.limit ||
+    !element.children.length ||
+    element.xyz.resolution === resolution
+  ) {
     return [element];
   }
 
@@ -2545,9 +2549,10 @@ function generate(resolution, bounds, parent, xyz) {
   let element = this.get(xyz);
 
   if (!element) {
-    element = { ...parent };
+    element = JSON.parse(JSON.stringify(parent));
     element.xyz = xyz;
     element.bounds = this.space.bounds(xyz);
+    element.children = [];
     element.fake = true;
   }
 
@@ -2555,11 +2560,7 @@ function generate(resolution, bounds, parent, xyz) {
     return [];
   }
 
-  if (
-    element.fake ||
-    !element.children.length ||
-    element.xyz.resolution === resolution
-  ) {
+  if (element.fake || element.xyz.resolution === resolution) {
     return [element];
   }
 

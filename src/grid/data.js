@@ -116,7 +116,11 @@ export function retrieve(resolution, bounds, xyz) {
     return [];
   }
 
-  if (!element.children.length || element.xyz.resolution === resolution) {
+  if (
+    element.count <= this.options.limit ||
+    !element.children.length ||
+    element.xyz.resolution === resolution
+  ) {
     return [element];
   }
 
@@ -129,9 +133,10 @@ export function generate(resolution, bounds, parent, xyz) {
   let element = this.get(xyz);
 
   if (!element) {
-    element = { ...parent };
+    element = JSON.parse(JSON.stringify(parent));
     element.xyz = xyz;
     element.bounds = this.space.bounds(xyz);
+    element.children = [];
     element.fake = true;
   }
 
@@ -139,11 +144,7 @@ export function generate(resolution, bounds, parent, xyz) {
     return [];
   }
 
-  if (
-    element.fake ||
-    !element.children.length ||
-    element.xyz.resolution === resolution
-  ) {
+  if (element.fake || element.xyz.resolution === resolution) {
     return [element];
   }
 

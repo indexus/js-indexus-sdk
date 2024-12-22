@@ -2338,7 +2338,7 @@
   async function process(selected, bounds, element) {
     const collection = element._collection;
     const hash = element._hash;
-    hash === ROOT ? 0 : hash.length;
+    const length = hash === ROOT ? 0 : hash.length;
 
     let set = element._items;
 
@@ -2355,7 +2355,7 @@
 
     set.forEach((elm) => {
       if (elm instanceof Item$1) {
-        // this.consolidate(merged, length + 1, elm);
+        this.consolidate(merged, length + 1, elm);
         return;
       }
 
@@ -2538,7 +2538,11 @@
       return [];
     }
 
-    if (!element.children.length || element.xyz.resolution === resolution) {
+    if (
+      element.count <= this.options.limit ||
+      !element.children.length ||
+      element.xyz.resolution === resolution
+    ) {
       return [element];
     }
 
@@ -2551,9 +2555,10 @@
     let element = this.get(xyz);
 
     if (!element) {
-      element = { ...parent };
+      element = JSON.parse(JSON.stringify(parent));
       element.xyz = xyz;
       element.bounds = this.space.bounds(xyz);
+      element.children = [];
       element.fake = true;
     }
 
@@ -2561,11 +2566,7 @@
       return [];
     }
 
-    if (
-      element.fake ||
-      !element.children.length ||
-      element.xyz.resolution === resolution
-    ) {
+    if (element.fake || element.xyz.resolution === resolution) {
       return [element];
     }
 
