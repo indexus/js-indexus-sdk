@@ -7,7 +7,7 @@ export function aggregate(data) {
     max = 0;
 
   this.space.dimensions.forEach((dimension, i) => {
-    const groups = new Map();
+    const groups = {};
 
     min = max;
     max += dimension.pointLength();
@@ -19,16 +19,16 @@ export function aggregate(data) {
       };
       const key = this.key(xyz);
 
-      if (!groups.has(key)) {
-        groups.set(key, {
+      if (!groups[key]) {
+        groups[key] = {
           xyz: xyz,
           bounds: elm.bounds[i],
           count: 0,
           metrics: Array(elm.metrics.length).fill(0),
-        });
+        };
       }
 
-      const group = groups.get(key);
+      const group = groups[key];
       group.count += elm.count;
       elm.metrics.forEach((m, idx) => {
         group.metrics[idx] += m;
