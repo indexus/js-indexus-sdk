@@ -155,14 +155,17 @@ class Linear extends BaseDimension {
   }
 
   segmentExtension(segment, offset) {
-    const root = this._rootSegment;
-    const step = offset * (root.end - root.start);
+    const step = offset * (segment.end - segment.start);
 
     return new Segment(segment.start - step, segment.end + step);
   }
 
   segmentsOverlap(segment1, segment2) {
-    return segment1.start <= segment2.end && segment1.end >= segment2.start;
+    return {
+      overlap: segment1.start <= segment2.end && segment1.end >= segment2.start,
+      contained:
+        segment1.start >= segment2.start && segment1.end <= segment2.end,
+    };
   }
 
   newFilter(distance, direction) {

@@ -55,7 +55,7 @@ class Network extends BaseNetwork {
 
       // Wrap each pingPeer call with the throttler's enqueue method
       const tasks = this._hosts.map((host) =>
-        this._throttler.enqueue(async () => {
+        this._throttler.enqueue(`pingPeer:${host}`, async () => {
           try {
             const [ip, port] = host.split("|");
             const peer = await this._api.pingPeer(this._protocol, ip, port);
@@ -104,8 +104,11 @@ class Network extends BaseNetwork {
       }
 
       try {
+        // Generate a unique key for addItem
+        const addItemKey = `addItem:${collection}:${root}:${location}:${reference}`;
+
         // Wrap the addItem API call with the throttler's enqueue method
-        await this._throttler.enqueue(() =>
+        await this._throttler.enqueue(addItemKey, () =>
           this._api.addItem(
             this._protocol,
             peer,
@@ -137,6 +140,7 @@ class Network extends BaseNetwork {
    * Retrieves a set of items from a collection at a specific location in the network.
    * If the operation fails, it retries with a different peer.
    * Implements caching to store and retrieve sets efficiently.
+   * Prevents multiple simultaneous getSet calls with the same collection and location.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
    * @returns {Promise<any>} - A promise that resolves with the retrieved set of items.
@@ -156,61 +160,70 @@ class Network extends BaseNetwork {
       return cachedSet;
     }
 
-    while (true) {
-      const id = transform(collection, next);
+    // Generate a unique key for getSet based on collection and location
+    const getSetKey = `getSet:${collection}:${location}`;
 
-      // Find the nearest peer to the id
-      let peer = this._table.nearest(id);
+    // Use the throttler's enqueue method with the unique key
+    return this._throttler.enqueue(getSetKey, async () => {
+      while (true) {
+        const id = transform(collection, next);
 
-      if (!peer) {
-        await this.discoverPeers();
-        peer = this._table.nearest(id);
-      }
+        // Find the nearest peer to the id
+        let peer = this._table.nearest(id);
 
-      try {
-        // Wrap the getSet API call with the throttler's enqueue method
-        const response = await this._throttler.enqueue(() =>
-          this._api.getSet(this._protocol, peer, collection, location)
-        );
-
-        if (
-          response.contact instanceof Peer &&
-          response.contact.hash() !== peer.hash()
-        ) {
-          this._table.insert(response.contact.id(), response.contact);
-          if (response.set === null) continue;
+        if (!peer) {
+          await this.discoverPeers();
+          peer = this._table.nearest(id);
         }
 
-        if (response.set !== null) {
-          // Before adding to cache, check if cache is at capacity
-          if (this._cache.size >= this._cacheSize) {
-            // Remove the least recently used (first inserted) item
-            const firstKey = this._cache.keys().next().value;
-            this._cache.delete(firstKey);
+        try {
+          // Wrap the getSet API call with the throttler's enqueue method
+          const response = await this._api.getSet(
+            this._protocol,
+            peer,
+            collection,
+            location
+          );
+
+          if (
+            response.contact instanceof Peer &&
+            response.contact.hash() !== peer.hash()
+          ) {
+            this._table.insert(response.contact.id(), response.contact);
+            if (response.set === null) continue;
           }
-          // Add the new set to the cache and mark it as recently used
-          this._cache.set(cacheKey, response.set);
-          return response.set;
-        }
 
-        if (next === ROOT) {
-          return [];
-        }
-        next = parent(next);
-      } catch (error) {
-        // If the request fails, remove the peer from the table and retry
-        this._table.remove(peer.id());
-        console.warn(
-          `Failed to get set via peer ${peer.hash()}. Retrying with a different peer...`
-        );
+          if (response.set !== null) {
+            // Before adding to cache, check if cache is at capacity
+            if (this._cache.size >= this._cacheSize) {
+              // Remove the least recently used (first inserted) item
+              const firstKey = this._cache.keys().next().value;
+              this._cache.delete(firstKey);
+            }
+            // Add the new set to the cache and mark it as recently used
+            this._cache.set(cacheKey, response.set);
+            return response.set;
+          }
 
-        attempts--;
-        if (attempts === 0) {
-          // If all attempts fail, throw an error
-          throw new Error("Failed to retrieve set after multiple attempts.");
+          if (next === ROOT) {
+            return [];
+          }
+          next = parent(next);
+        } catch (error) {
+          // If the request fails, remove the peer from the table and retry
+          this._table.remove(peer.id());
+          console.warn(
+            `Failed to get set via peer ${peer.hash()}. Retrying with a different peer...`
+          );
+
+          attempts--;
+          if (attempts === 0) {
+            // If all attempts fail, throw an error
+            throw new Error("Failed to retrieve set after multiple attempts.");
+          }
         }
       }
-    }
+    });
   }
 }
 
