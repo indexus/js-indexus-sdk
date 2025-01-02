@@ -8,6 +8,7 @@ const State = {
   Selected: "selected",
   Loaded: "loaded",
   Streamed: "streamed",
+  Refresh: "refresh",
 };
 
 class Monitoring {

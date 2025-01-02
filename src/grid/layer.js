@@ -2,51 +2,94 @@ import { Item } from "../entities/item.js";
 import { Set } from "../entities/set.js";
 import { ROOT } from "../utilities/encoding.js";
 import { asyncPool } from "../utilities/network.js";
+import { State, Monitoring } from "../model/index.js";
 
-export function prepare(zoom, bounds) {
-  const offset = this.options.offset;
-  const center = this.space.center(bounds);
+export function project(zoom, bounds) {
+  const result = [];
 
-  const depthMax = Math.floor((zoom + offset) / this.space.step);
-  const depthMin = Math.floor((zoom - offset) / this.space.step);
+  let currentZoom = zoom + this.options.resolution;
+  let currentBounds = this.space.extend(bounds, this.options.offset.bounds);
 
-  const hashMax = this.space.encode(center, depthMax);
-  const hashMin = this.space.encode(center, depthMin);
+  const integerZoom = Math.floor(currentZoom);
+  const fractionalZoom = currentZoom - integerZoom;
 
-  if (
-    this.preload &&
-    this.preload.max === hashMax &&
-    this.preload.min === hashMin
-  ) {
-    return this.preload;
+  if (fractionalZoom !== 0) {
+    currentBounds = this.space.extend(currentBounds, -0.25 * fractionalZoom);
+    currentZoom = integerZoom;
   }
 
-  const step = offset / Math.pow(2, zoom);
-  const extended = this.space.extend(bounds, step);
+  const zoomMax = Math.floor(
+    zoom + this.options.resolution + this.options.offset.zoom
+  );
 
-  return {
-    max: hashMax,
-    min: hashMin,
-    depth: depthMax,
-    extended: extended,
-    delta: true,
-  };
+  for (let z = 0; z <= zoomMax; z++) {
+    let boundsAtZoom = currentBounds;
+
+    // if (z < currentZoom) {
+    //   const steps = currentZoom - z;
+    //   for (let s = 0; s < steps; s++) {
+    //     boundsAtZoom = this.space.extend(boundsAtZoom, 0.5);
+    //   }
+    // }
+
+    if (z > currentZoom) {
+      const steps = z - currentZoom;
+      for (let s = 0; s < steps; s++) {
+        boundsAtZoom = this.space.extend(boundsAtZoom, -0.25);
+      }
+    }
+
+    if (z % this.space.step === 0) {
+      result[z / this.space.step] = boundsAtZoom;
+    }
+  }
+
+  return result;
 }
 
-export async function refresh(list, bounds, depth) {
+export async function refresh(id, list, bounds, depth, current = 0) {
   const selected = [];
 
-  await Promise.all(list.map((elm) => this.process(selected, bounds, elm)));
+  await Promise.all(
+    list.map(async (elm) => {
+      const elements = await this.process(elm);
 
-  if (depth) {
-    await this.refresh(selected, bounds, depth - 1);
+      elements.forEach((elm) => {
+        if (!this.space.overlap(bounds[current], elm._bounds).overlap) return;
+        selected.push(elm);
+      });
+    })
+  );
+
+  let total = 0;
+  list.forEach((elm) => {
+    if (!elm._items) total++;
+  });
+
+  this.monitoring.send(
+    new Monitoring(current, State.Refresh, {
+      id: id,
+      depth: current,
+      bounds: bounds[current],
+      size: total,
+    })
+  );
+
+  if (id === this.current.id) {
+    if (current < depth) {
+      await this.refresh(id, selected, bounds, depth, current + 1);
+    } else {
+      this.finish(id);
+    }
   }
 }
 
-export async function process(selected, bounds, element) {
+export async function process(element) {
   const collection = element._collection;
   const hash = element._hash;
-  const length = hash === ROOT ? 0 : hash.length;
+  const key = `${collection}-${hash}`;
+
+  if (this.cache.has(key)) return this.cache.get(key);
 
   let set = element._items;
 
@@ -58,7 +101,9 @@ export async function process(selected, bounds, element) {
     }
   }
 
+  const length = hash === ROOT ? 0 : hash.length;
   const elements = [];
+  const data = [];
   const merged = {};
 
   set.forEach((elm) => {
@@ -70,40 +115,17 @@ export async function process(selected, bounds, element) {
     elm._bounds = this.space.decode(elm._hash);
     elm._xyz = this.space.xyz(elm._hash);
 
-    elements.push(
-      this.create(
-        elm._xyz,
-        elm._bounds,
-        elm._count,
-        elm._metrics,
-        undefined,
-        []
-      )
-    );
-
-    if (this.space.overlap(bounds, elm._bounds)) {
-      selected.push(elm);
-    }
+    elements.push(elm);
   });
 
   Object.values(merged).forEach((elm) => {
-    elements.push(
-      this.create(
-        elm._xyz,
-        elm._bounds,
-        elm._count,
-        elm._metrics,
-        elm._items,
-        []
-      )
-    );
-
-    if (this.space.overlap(bounds, elm._bounds)) {
-      selected.push(elm);
-    }
+    elements.push(elm);
   });
 
-  this.set(elements);
+  this.cache.set(key, elements);
+  this.stream(elements);
+
+  return elements;
 }
 
 export function consolidate(merged, length, elm) {

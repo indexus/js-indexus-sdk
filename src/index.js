@@ -6,6 +6,7 @@ export { Space } from "./entities/space.js";
 
 // Local
 export { Local } from "./local/index.js";
+export { Cube } from "./cube/index.js";
 export { Grid } from "./grid/index.js";
 
 // Networking

@@ -75,9 +75,30 @@ class Space {
   }
 
   overlap(bounds, segments) {
-    return this.dimensions.every((dimension, idx) =>
-      dimension.segmentsOverlap(bounds[idx], segments[idx])
-    );
+    let overlap = true;
+    let contained = true;
+
+    for (let idx = 0; idx < this.dimensions.length; idx++) {
+      const result = this.dimensions[idx].segmentsOverlap(
+        bounds[idx],
+        segments[idx]
+      );
+
+      if (!result.overlap) {
+        overlap = false;
+        contained = false;
+        break;
+      }
+
+      if (!result.contained) {
+        contained = false;
+      }
+    }
+
+    return {
+      overlap,
+      contained,
+    };
   }
 
   // Private methods

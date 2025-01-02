@@ -109,48 +109,26 @@ export function merge(parents, element) {
   parent.children.push(element.xyz);
 }
 
-export function retrieve(resolution, bounds, xyz) {
+export function retrieve(resolution, bounds, xyz, bypass) {
   const element = this.get(xyz);
 
-  if (!this.space.overlap(bounds, element.bounds)) {
-    return [];
+  if (!bypass) {
+    const { overlap, contained } = this.space.overlap(bounds, element.bounds);
+
+    if (!overlap) return [];
+
+    bypass = contained;
   }
 
   if (
+    element.xyz.resolution === resolution ||
     element.count <= this.options.limit ||
-    !element.children.length ||
-    element.xyz.resolution === resolution
+    !element.children.length
   ) {
     return [element];
   }
 
   return element.children.reduce((accumulator, child) => {
-    return accumulator.concat(this.retrieve(resolution, bounds, child));
-  }, []);
-}
-
-export function generate(resolution, bounds, parent, xyz) {
-  let element = this.get(xyz);
-
-  if (!element) {
-    element = JSON.parse(JSON.stringify(parent));
-    element.xyz = xyz;
-    element.bounds = this.space.bounds(xyz);
-    element.children = [];
-    element.fake = true;
-  }
-
-  if (!this.space.overlap(bounds, element.bounds)) {
-    return [];
-  }
-
-  if (element.fake || element.xyz.resolution === resolution) {
-    return [element];
-  }
-
-  return this.children(element.xyz).reduce((accumulator, child) => {
-    return accumulator.concat(
-      this.generate(resolution, bounds, element, child)
-    );
+    return accumulator.concat(this.retrieve(resolution, bounds, child, bypass));
   }, []);
 }

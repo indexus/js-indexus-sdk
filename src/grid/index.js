@@ -1,82 +1,42 @@
 import { Monitoring, State, Mask, Offset, Network } from "../model/index.js";
 import { Set } from "../entities/set.js";
 
-import { prepare, refresh, consolidate, process } from "./layer.js";
-import {
-  create,
-  equal,
-  add,
-  get,
-  key,
-  parent,
-  children,
-  merge,
-  set,
-  generate,
-  retrieve,
-} from "./data.js";
-import { aggregate } from "./aggregation.js";
+import { project, refresh, consolidate, process } from "./layer.js";
 
 class Grid {
-  constructor(collection, space, options, monitoring, network) {
+  constructor(collection, space, options, stream, finish, monitoring, network) {
     this.collection = collection;
     this.space = space;
-    this.data = {};
     this.options = options;
+    this.stream = stream;
+    this.finish = finish;
     this.monitoring = monitoring;
     this.network = network;
 
+    this.current = {};
+    this.cache = new Map();
     this.root = new Set(collection, "@", undefined, undefined);
-    this.rootXyz = this.space.xyz("@");
   }
 
-  async init() {
-    await this.refresh([this.root], this.space.root(), 0);
-  }
+  async move(zoom, bounds) {
+    const depth = Math.floor(
+      (zoom + this.options.resolution + this.options.offset.zoom) /
+        this.space.step
+    );
+    const hash = this.space.encode(this.space.center(bounds), depth);
 
-  move(zoom, bounds) {
-    this.preload = this.prepare(zoom + this.options.resolution, bounds);
+    if (this.current.hash === hash) return;
 
-    if (this.preload.delta) {
-      this.preload.delta = false;
+    const id = crypto.randomUUID();
+    this.current = { hash, id };
 
-      this.refresh([this.root], this.preload.extended, this.preload.depth);
-    }
-  }
-
-  display(zoom, bounds) {
-    const resolution = zoom + this.options.resolution;
-
-    const raw = !this.options.full
-      ? this.retrieve(resolution, bounds, this.rootXyz)
-      : this.generate(resolution, bounds, null, this.rootXyz);
-
-    const aggregated = this.aggregate(raw);
-
-    return {
-      raw,
-      aggregated,
-    };
+    this.refresh(id, [this.root], this.project(zoom, bounds), depth);
   }
 }
 
-Grid.prototype.prepare = prepare;
+Grid.prototype.project = project;
 Grid.prototype.refresh = refresh;
 Grid.prototype.process = process;
 Grid.prototype.consolidate = consolidate;
-
-Grid.prototype.create = create;
-Grid.prototype.equal = equal;
-Grid.prototype.add = add;
-Grid.prototype.get = get;
-Grid.prototype.key = key;
-Grid.prototype.parent = parent;
-Grid.prototype.children = children;
-Grid.prototype.set = set;
-Grid.prototype.merge = merge;
-Grid.prototype.retrieve = retrieve;
-Grid.prototype.generate = generate;
-
-Grid.prototype.aggregate = aggregate;
 
 export { Grid };

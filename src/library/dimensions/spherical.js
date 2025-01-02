@@ -207,10 +207,17 @@ class Spherical extends BaseDimension {
   }
 
   segmentExtension(segment, offset) {
-    const root = this._rootSegment;
-    const latStep = offset * (root.north - root.south);
-    const lngStep = offset * (root.east - root.west);
+    const latStep = offset * (segment.north - segment.south);
+    const lngStep = offset * (segment.east - segment.west);
 
+    if (lngStep * (2 + 1 / offset) > 360) {
+      return new Segment(
+        this._normalizeLat(segment.south - latStep),
+        this._normalizeLat(segment.north + latStep),
+        this._normalizeLng(-180),
+        this._normalizeLng(180)
+      );
+    }
     return new Segment(
       this._normalizeLat(segment.south - latStep),
       this._normalizeLat(segment.north + latStep),
@@ -239,30 +246,29 @@ class Spherical extends BaseDimension {
   }
 
   segmentsOverlap(segment1, segment2) {
-    if (segment1.north < segment2.south || segment2.north < segment1.south) {
-      return false;
-    }
-
     const aWest = this._normalizeLng(segment1.west);
     const aEast = this._normalizeLng(segment1.east);
     const bWest = this._normalizeLng(segment2.west);
     const bEast = this._normalizeLng(segment2.east);
 
-    const lngOverlap = (west1, east1, west2, east2) => {
-      const wraps = (west, east) => west > east;
+    const wraps = (west, east) => west > east;
 
-      if (!wraps(west1, east1) && !wraps(west2, east2)) {
+    const lngOverlap = (west1, east1, west2, east2) => {
+      const wraps1 = wraps(west1, east1);
+      const wraps2 = wraps(west2, east2);
+
+      if (!wraps1 && !wraps2) {
         return west1 <= east2 && east1 >= west2;
       }
 
-      if (wraps(west1, east1)) {
+      if (wraps1) {
         return (
           lngOverlap(west1, 180, west2, east2) ||
           lngOverlap(-180, east1, west2, east2)
         );
       }
 
-      if (wraps(west2, east2)) {
+      if (wraps2) {
         return (
           lngOverlap(west1, east1, west2, 180) ||
           lngOverlap(west1, east1, -180, east2)
@@ -272,7 +278,40 @@ class Spherical extends BaseDimension {
       return false;
     };
 
-    return lngOverlap(aWest, aEast, bWest, bEast);
+    const latOverlap = !(
+      segment1.north < segment2.south || segment2.north < segment1.south
+    );
+
+    const doesOverlap = latOverlap && lngOverlap(aWest, aEast, bWest, bEast);
+
+    if (!doesOverlap) {
+      return { overlap: false, contained: false };
+    }
+
+    const latContained =
+      segment1.south <= segment2.south && segment1.north >= segment2.north;
+
+    const lngContained = (() => {
+      if (!wraps(aWest, aEast) && !wraps(bWest, bEast)) {
+        return aWest <= bWest && aEast >= bEast;
+      }
+
+      if (wraps(aWest, aEast)) {
+        return (
+          (aWest <= bWest && aEast >= bEast) ||
+          (aWest <= bWest + 360 && aEast >= bEast + 360)
+        );
+      }
+
+      return false;
+    })();
+
+    const isContained = latContained && lngContained;
+
+    return {
+      overlap: true,
+      contained: isContained,
+    };
   }
 
   newFilter(distance, direction) {
