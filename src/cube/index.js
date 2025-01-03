@@ -13,10 +13,11 @@ import {
 import { aggregate } from "./aggregation.js";
 
 class Cube {
-  constructor(collection, space, options) {
+  constructor(collection, space, options, isCovered = (elm) => true) {
     this.collection = collection;
     this.space = space;
     this.options = options;
+    this.isCovered = isCovered;
 
     this.current = {};
     this.data = {};

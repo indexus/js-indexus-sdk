@@ -2483,7 +2483,7 @@
 
     if (
       element.xyz.resolution === resolution ||
-      element.count <= this.options.limit ||
+      (element.count <= this.options.limit && this.isCovered(element)) ||
       !element.children.length
     ) {
       return [element];
@@ -2538,10 +2538,11 @@
   }
 
   class Cube {
-    constructor(collection, space, options) {
+    constructor(collection, space, options, isCovered = (elm) => true) {
       this.collection = collection;
       this.space = space;
       this.options = options;
+      this.isCovered = isCovered;
 
       this.current = {};
       this.data = {};

@@ -122,7 +122,7 @@ export function retrieve(resolution, bounds, xyz, bypass) {
 
   if (
     element.xyz.resolution === resolution ||
-    element.count <= this.options.limit ||
+    (element.count <= this.options.limit && this.isCovered(element)) ||
     !element.children.length
   ) {
     return [element];
