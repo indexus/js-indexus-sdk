@@ -3,6 +3,7 @@ import axios from "axios";
 import { Space } from "../entities/space.js";
 import { Peer } from "../network/peer.js";
 import { getHostFromIP } from "../utilities/network.js";
+import { authHeaders } from "./authHeaders.js";
 
 /**
  * Ping
@@ -21,9 +22,9 @@ export async function pingPeer(protocol, ip, port) {
       `${protocol}://${getHostFromIP(ip)}:${port}/ping`,
       requestBody,
       {
-        headers: {
+        headers: authHeaders({
           "Content-Type": "application/json",
-        },
+        }),
       }
     );
 

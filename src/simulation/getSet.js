@@ -11,13 +11,14 @@ import { Peer } from "../network/peer.js";
  * @param {Peer} peer - The peer to contact.
  * @param {string} collection - The ID of the collection.
  * @param {string} location - The location within the collection.
+ * @param {number} depth - Path-fill budget, mirrors the real API.
  * @returns {Promise<Object>} - The response from the server, including the set data.
  */
-export async function getSet(peer, collection, location) {
+export async function getSet(peer, collection, location, depth = 2) {
   // Construct the GET request URL
   const url = `http://127.0.0.1:2100/set?collection=${encodeURIComponent(
     collection
-  )}&location=${encodeURIComponent(location)}`;
+  )}&location=${encodeURIComponent(location)}&depth=${depth}`;
 
   try {
     // Make the GET request to retrieve the set from the collection

@@ -16,7 +16,7 @@ const collection1 = new Collection("DENjYsMTAyLDE2MCwxMjYsPjQ5L", [
   },
 ]);
 
-const collection2 = new Collection("DENjYsMTAyLDE2MEwxMjYsPjQ5L", [
+const collection2 = new Collection("m2GR2Q9BLwF3gdXL", [
   {
     name: "gps",
     type: "spherical",

@@ -407,7 +407,7 @@ class Monitoring {
   }
 }
 
-class Set$1 extends Element {
+class Set$2 extends Element {
   // Inherits from Element; no additional methods needed unless extending functionality
 }
 
@@ -772,14 +772,28 @@ class API$1 {
   async addItem(protocol, peer, collection, location, metrics, reference) {}
 
   /**
+   * Deletes an item from a collection at a specific location on a peer.
+   * @param {string} protocol - Protocol to use to contact the peer http/https.
+   * @param {Peer} peer - The peer holding the ingress for the deletion.
+   * @param {string} collection - The name of the collection.
+   * @param {string} root - The targeted root set.
+   * @param {string} location - The location identifier within the collection.
+   * @param {string} reference - The unique identifier of the item to delete.
+   * @returns {Promise<any>} - A promise that resolves when the deletion is accepted.
+   */
+  async deleteItem(protocol, peer, collection, root, location, reference) {}
+
+  /**
    * Retrieves a set of items from a collection at a specific location on a peer.
    * @param {string} protocol - Protocol to use to contact the peer http/https.
    * @param {Peer} peer - The peer from which to retrieve the set.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
+   * @param {number} depth - Path-fill budget: 2 to let the peer fill from its
+   *   neighbors, 0 to ask for a contact redirect.
    * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
    */
-  async getSet(protocol, peer, collection, location) {}
+  async getSet(protocol, peer, collection, location, depth) {}
 }
 
 /**
@@ -799,13 +813,26 @@ class Network$1 {
   static async addItem(collection, root, location, metrics, reference) {}
 
   /**
+   * Deletes an item from a collection at a specific location in the network.
+   * If the operation fails, it retries with a different peer.
+   * @param {string} collection - The name of the collection.
+   * @param {string} root - The targeted root set.
+   * @param {string} location - The location identifier within the collection.
+   * @param {string} reference - The unique identifier of the item to delete.
+   * @returns {Promise<void>}
+   */
+  static async deleteItem(collection, root, location, reference) {}
+
+  /**
    * Retrieves a set of items from a collection at a specific location in the network.
    * The method selects the appropriate peer(s) to handle the request.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
+   * @param {number} depth - Path-fill budget: 2 to let the first peer fill from
+   *   its neighbors, 0 to follow a contact redirect instead.
    * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
    */
-  static async getSet(collection, location) {}
+  static async getSet(collection, location, depth) {}
 }
 
 class Item$1 extends Item$2 {
@@ -859,7 +886,7 @@ class Item$1 extends Item$2 {
   }
 }
 
-class Set extends Set$1 {
+class Set$1 extends Set$2 {
   constructor(collection, hash, count, metrics) {
     super();
 
@@ -2290,7 +2317,7 @@ class Local {
     this.network = network;
 
     for (const [key, space] of Object.entries(this.spaces)) {
-      const element = new Set(key, ROOT, 0);
+      const element = new Set$1(key, ROOT, 0);
 
       if (!this.addLocation(space, element)) {
         this.monitoring.send(
@@ -2661,7 +2688,7 @@ async function refresh(id, list, bounds, depth, current = 0) {
   }
 }
 
-async function process(element) {
+async function process$1(element) {
   const collection = element._collection;
   const hash = element._hash;
   const key = `${collection}-${hash}`;
@@ -2709,7 +2736,7 @@ function consolidate(merged, length, elm) {
   const set = merged[hash];
 
   if (!set) {
-    const n = new Set(elm._collection, hash, 1, elm._metrics);
+    const n = new Set$1(elm._collection, hash, 1, elm._metrics);
 
     n._bounds = this.space.decode(n._hash);
     n._xyz = this.space.xyz(n._hash);
@@ -2738,7 +2765,7 @@ class Grid {
 
     this.current = {};
     this.cache = new Map();
-    this.root = new Set(collection, "@", undefined, undefined);
+    this.root = new Set$1(collection, "@", undefined, undefined);
   }
 
   async move(zoom, bounds) {
@@ -2759,7 +2786,7 @@ class Grid {
 
 Grid.prototype.project = project;
 Grid.prototype.refresh = refresh;
-Grid.prototype.process = process;
+Grid.prototype.process = process$1;
 Grid.prototype.consolidate = consolidate;
 
 class Peer extends Peer$1 {
@@ -2949,6 +2976,16 @@ class Throttler {
 
 // Network.js
 
+function randomRoutingKey(byteLength = 16) {
+  const bytes = new Uint8Array(byteLength);
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < byteLength; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return bytes;
+}
+
 /**
  * Represents the network abstraction that manages peer-to-peer interactions.
  * This class extends the base Network class and handles peer selection, retries,
@@ -2981,12 +3018,21 @@ class Network extends Network$1 {
     this._cache = new Map();
     this._cacheSize = cacheSize;
 
+    // Stable per-session XOR routing key: first hop targets the nearest
+    // peer to this key (read + write ingress), not the data owner.
+    this._routingKey = randomRoutingKey(16);
+
     // Initialize the network by searching for peers
     this.discoverPeers();
   }
 
   getConcurrency() {
     return this._concurrency;
+  }
+
+  /** @returns {Uint8Array} session routing key used for ingress peer selection */
+  routingKey() {
+    return this._routingKey;
   }
 
   /**
@@ -3024,33 +3070,34 @@ class Network extends Network$1 {
 
   /**
    * Adds an item to a collection at a specific location in the network.
+   * Ingress uses the session routing key (neighbor), not the data owner.
    * If the operation fails, it retries with a different peer.
-   * @param {string} collection - The name of the collection.
-   * @param {string} root - The targeted root set.
-   * @param {string} location - The location identifier within the collection.
-   * @param {number[]} metrics - The metrics of the item to add.
-   * @param {string} reference - The unique identifier of the item to add.
-   * @returns {Promise<void>}
    */
   async addItem(collection, root, location, metrics, reference) {
     let attempts = this._attempts;
-
-    const id = transform(collection, location);
+    const tried = new Set();
 
     while (true) {
-      // Find the nearest peer to the id
-      let peer = this._table.nearest(id);
+      let peer = this._table.nearest(this._routingKey);
 
       if (!peer) {
         await this.discoverPeers();
-        peer = this._table.nearest(id);
+        peer = this._table.nearest(this._routingKey);
       }
 
+      // Fallback: try owner-direction peer if ingress peer already failed.
+      if (!peer || tried.has(peer.hash())) {
+        peer = this._table.nearest(transform(collection, location));
+      }
+
+      if (!peer) {
+        throw new Error("No peers available for write ingress.");
+      }
+      tried.add(peer.hash());
+
       try {
-        // Generate a unique key for addItem
         const addItemKey = `addItem:${collection}:${root}:${location}:${reference}`;
 
-        // Wrap the addItem API call with the throttler's enqueue method
         await this._throttler.enqueue(addItemKey, () =>
           this._api.addItem(
             this._protocol,
@@ -3064,7 +3111,6 @@ class Network extends Network$1 {
         );
         return;
       } catch (error) {
-        // If the request fails, remove the peer from the table and retry
         this._table.remove(peer.id());
         console.warn(
           `Failed to add item via peer ${peer.hash()}. Retrying with a different peer...`
@@ -3072,7 +3118,6 @@ class Network extends Network$1 {
 
         attempts--;
         if (attempts === 0) {
-          // If all attempts fail, throw an error
           throw new Error("Failed to add item after multiple attempts.");
         }
       }
@@ -3080,38 +3125,93 @@ class Network extends Network$1 {
   }
 
   /**
-   * Retrieves a set of items from a collection at a specific location in the network.
+   * Deletes an item from a collection at a specific location in the network.
+   * Same ingress as addItem: the session routing key, not the data owner.
    * If the operation fails, it retries with a different peer.
-   * Implements caching to store and retrieve sets efficiently.
-   * Prevents multiple simultaneous getSet calls with the same collection and location.
-   * @param {string} collection - The name of the collection.
-   * @param {string} location - The location identifier within the collection.
-   * @returns {Promise<any>} - A promise that resolves with the retrieved set of items.
    */
-  async getSet(collection, location) {
+  async deleteItem(collection, root, location, reference) {
+    let attempts = this._attempts;
+    const tried = new Set();
+
+    while (true) {
+      let peer = this._table.nearest(this._routingKey);
+
+      if (!peer) {
+        await this.discoverPeers();
+        peer = this._table.nearest(this._routingKey);
+      }
+
+      // Fallback: try owner-direction peer if ingress peer already failed.
+      if (!peer || tried.has(peer.hash())) {
+        peer = this._table.nearest(transform(collection, location));
+      }
+
+      if (!peer) {
+        throw new Error("No peers available for write ingress.");
+      }
+      tried.add(peer.hash());
+
+      try {
+        const deleteItemKey = `deleteItem:${collection}:${root}:${location}:${reference}`;
+
+        await this._throttler.enqueue(deleteItemKey, () =>
+          this._api.deleteItem(
+            this._protocol,
+            peer,
+            collection,
+            root,
+            location,
+            reference
+          )
+        );
+        // Drop our own copy for this location; ancestors expire on TTL.
+        this._cache.delete(`${collection}:${location}`);
+        return;
+      } catch (error) {
+        this._table.remove(peer.id());
+        console.warn(
+          `Failed to delete item via peer ${peer.hash()}. Retrying with a different peer...`
+        );
+
+        attempts--;
+        if (attempts === 0) {
+          throw new Error("Failed to delete item after multiple attempts.");
+        }
+      }
+    }
+  }
+
+  /**
+   * Retrieves a set. First hop uses the session routing key so the nearest
+   * neighbor can serve from cache / path-fill. Follows contact redirects and
+   * parent locations as before.
+   *
+   * `depth` is the path-fill budget handed to the first peer: 2 (default) lets
+   * it fetch and cache on our behalf, 0 asks for a contact redirect instead —
+   * useful for dense leaves whose payload is not worth caching at every hop.
+   */
+  async getSet(collection, location, depth = 2) {
     let attempts = this._attempts;
     let next = location;
 
     const cacheKey = `${collection}:${location}`;
 
-    // Check the cache before making a network request
     if (this._cache.has(cacheKey)) {
-      // Move the key to the end to mark it as recently used
       const cachedSet = this._cache.get(cacheKey);
       this._cache.delete(cacheKey);
       this._cache.set(cacheKey, cachedSet);
       return cachedSet;
     }
 
-    // Generate a unique key for getSet based on collection and location
     const getSetKey = `getSet:${collection}:${location}`;
 
-    // Use the throttler's enqueue method with the unique key
     return this._throttler.enqueue(getSetKey, async () => {
+      let useRoutingKey = true;
       while (true) {
-        const id = transform(collection, next);
+        const id = useRoutingKey
+          ? this._routingKey
+          : transform(collection, next);
 
-        // Find the nearest peer to the id
         let peer = this._table.nearest(id);
 
         if (!peer) {
@@ -3120,12 +3220,12 @@ class Network extends Network$1 {
         }
 
         try {
-          // Wrap the getSet API call with the throttler's enqueue method
           const response = await this._api.getSet(
             this._protocol,
             peer,
             collection,
-            location
+            location,
+            depth
           );
 
           if (
@@ -3133,17 +3233,18 @@ class Network extends Network$1 {
             response.contact.hash() !== peer.hash()
           ) {
             this._table.insert(response.contact.id(), response.contact);
-            if (response.set === null) continue;
+            if (response.set === null) {
+              // Follow toward owner / path-fill contact.
+              useRoutingKey = false;
+              continue;
+            }
           }
 
           if (response.set !== null) {
-            // Before adding to cache, check if cache is at capacity
             if (this._cache.size >= this._cacheSize) {
-              // Remove the least recently used (first inserted) item
               const firstKey = this._cache.keys().next().value;
               this._cache.delete(firstKey);
             }
-            // Add the new set to the cache and mark it as recently used
             this._cache.set(cacheKey, response.set);
             return response.set;
           }
@@ -3152,8 +3253,8 @@ class Network extends Network$1 {
             return [];
           }
           next = parent$1(next);
+          useRoutingKey = true;
         } catch (error) {
-          // If the request fails, remove the peer from the table and retry
           this._table.remove(peer.id());
           console.warn(
             `Failed to get set via peer ${peer.hash()}. Retrying with a different peer...`
@@ -3161,7 +3262,6 @@ class Network extends Network$1 {
 
           attempts--;
           if (attempts === 0) {
-            // If all attempts fail, throw an error
             throw new Error("Failed to retrieve set after multiple attempts.");
           }
         }
@@ -9125,6 +9225,29 @@ axios.default = axios;
 var axios$1 = axios;
 
 /**
+ * Optional Authorization header for Indexus permissioned meshes.
+ * Set via:
+ *   globalThis.__INDEXUS_BEARER__ = "<token>"
+ *   or process.env.INDEXUS_BEARER
+ */
+function authHeaders(extra = {}) {
+  let token;
+  try {
+    token = globalThis.__INDEXUS_BEARER__;
+  } catch (_) {
+    token = undefined;
+  }
+  if (!token && typeof process !== "undefined" && process.env) {
+    token = process.env.INDEXUS_BEARER;
+  }
+  const headers = { ...extra };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+/**
  * Ping
  * @param {string} protocol - Protocol to use to contact the peer http/https.
  * @param {string} ip - The ip of the peer
@@ -9141,9 +9264,9 @@ async function pingPeer(protocol, ip, port) {
       `${protocol}://${getHostFromIP(ip)}:${port}/ping`,
       requestBody,
       {
-        headers: {
+        headers: authHeaders({
           "Content-Type": "application/json",
-        },
+        }),
       }
     );
 
@@ -9204,14 +9327,80 @@ async function addItem(
       `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
       requestBody,
       {
-        headers: {
+        headers: authHeaders({
           "Content-Type": "application/json",
-        },
+        }),
       }
     );
   } catch (error) {
-    // Handle and log errors
+    const status = error?.response?.status;
+    const retryAfter = error?.response?.headers?.["retry-after"];
+    if (status === 503 && retryAfter) {
+      const ms = Math.max(1, Number(retryAfter)) * 1000;
+      await new Promise((r) => setTimeout(r, ms));
+      // One soft retry after backpressure.
+      await axios$1.post(
+        `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
+        requestBody,
+        {
+          headers: authHeaders({
+            "Content-Type": "application/json",
+          }),
+        }
+      );
+      return;
+    }
     console.error("Error adding item to the collection:", error);
+    throw error;
+  }
+}
+
+/**
+ * Deletes an item from a collection.
+ *
+ * @param {string} protocol - Protocol to use to contact the peer http/https.
+ * @param {Peer} peer - The peer to contact
+ * @param {string} collection - The ID of the collection.
+ * @param {string} root - The targeted root set.
+ * @param {string} location - The location of the item.
+ * @param {string} reference - The ID of the item.
+ * @returns {Promise<void>} - Resolves once the peer accepted the deletion.
+ */
+async function deleteItem(
+  protocol,
+  peer,
+  collection,
+  root,
+  location,
+  reference
+) {
+  const url = `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item/delete`;
+  const requestBody = {
+    item: {
+      collection: collection,
+      location: location,
+      id: reference,
+    },
+    root: root,
+    current: location,
+  };
+  const headers = authHeaders({
+    "Content-Type": "application/json",
+  });
+
+  try {
+    await axios$1.post(url, requestBody, { headers });
+  } catch (error) {
+    const status = error?.response?.status;
+    const retryAfter = error?.response?.headers?.["retry-after"];
+    if (status === 503 && retryAfter) {
+      const ms = Math.max(1, Number(retryAfter)) * 1000;
+      await new Promise((r) => setTimeout(r, ms));
+      // One soft retry after backpressure.
+      await axios$1.post(url, requestBody, { headers });
+      return;
+    }
+    console.error("Error deleting item from the collection:", error);
     throw error;
   }
 }
@@ -9223,20 +9412,22 @@ async function addItem(
  * @param {Peer} peer - The peer to contact.
  * @param {string} collection - The ID of the collection.
  * @param {string} location - The location within the collection.
+ * @param {number} depth - Path-fill budget: 2 lets the peer fetch from its own
+ *   neighbors and cache the result, 0 asks for a contact redirect instead.
  * @returns {Promise<Object>} - The response from the server, including the set data.
  */
-async function getSet(protocol, peer, collection, location) {
+async function getSet(protocol, peer, collection, location, depth = 2) {
   // Construct the GET request URL
   const url = `${protocol}://${getHostFromIP(
     peer.ip()
   )}:${peer.port()}/set?collection=${encodeURIComponent(
     collection
-  )}&location=${encodeURIComponent(location)}`;
+  )}&location=${encodeURIComponent(location)}&depth=${depth}`;
 
   try {
     // Make the GET request to retrieve the set from the collection
     const response = await axios$1.get(url, {
-      headers: {},
+      headers: authHeaders(),
     });
 
     // Parse the JSON response
@@ -9266,7 +9457,7 @@ async function getSet(protocol, peer, collection, location) {
           // Assuming the key is the hash, and value is the count
           const hash = key;
           const count = value.count;
-          elements.push(new Set(collection, hash, count, value.metrics));
+          elements.push(new Set$1(collection, hash, count, value.metrics));
         }
       }
 
@@ -9308,6 +9499,7 @@ class API extends API$1 {
 
 API.prototype.pingPeer = pingPeer;
 API.prototype.addItem = addItem;
+API.prototype.deleteItem = deleteItem;
 API.prototype.getSet = getSet;
 
-export { API, Collection, Cube, Grid, Item$1 as Item, Linear, Local, Network, Peer, Set, Space, Spherical, decodeUrl64, encodeUrl64, parent$1 as parent };
+export { API, Collection, Cube, Grid, Item$1 as Item, Linear, Local, Network, Peer, Set$1 as Set, Space, Spherical, decodeUrl64, encodeUrl64, parent$1 as parent };

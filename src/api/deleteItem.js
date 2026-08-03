@@ -1,53 +1,44 @@
 import axios from "axios";
 
-import { Space } from "../entities/space.js";
 import { Peer } from "../network/peer.js";
 import { getHostFromIP } from "../utilities/network.js";
 import { authHeaders } from "./authHeaders.js";
 
 /**
- * Adds an item to a collection.
+ * Deletes an item from a collection.
  *
  * @param {string} protocol - Protocol to use to contact the peer http/https.
  * @param {Peer} peer - The peer to contact
  * @param {string} collection - The ID of the collection.
  * @param {string} root - The targeted root set.
  * @param {string} location - The location of the item.
- * @param {string} id - The ID of the item.
- * @returns {Promise<Object>} - The response from the server.
+ * @param {string} reference - The ID of the item.
+ * @returns {Promise<void>} - Resolves once the peer accepted the deletion.
  */
-export async function addItem(
+export async function deleteItem(
   protocol,
   peer,
   collection,
   root,
   location,
-  metrics,
   reference
 ) {
-  // Construct the POST request body
+  const url = `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item/delete`;
   const requestBody = {
     item: {
       collection: collection,
       location: location,
-      metrics: metrics,
       id: reference,
     },
     root: root,
     current: location,
   };
+  const headers = authHeaders({
+    "Content-Type": "application/json",
+  });
 
   try {
-    // Make the POST request to add the item to the collection
-    await axios.post(
-      `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
-      requestBody,
-      {
-        headers: authHeaders({
-          "Content-Type": "application/json",
-        }),
-      }
-    );
+    await axios.post(url, requestBody, { headers });
   } catch (error) {
     const status = error?.response?.status;
     const retryAfter = error?.response?.headers?.["retry-after"];
@@ -55,18 +46,10 @@ export async function addItem(
       const ms = Math.max(1, Number(retryAfter)) * 1000;
       await new Promise((r) => setTimeout(r, ms));
       // One soft retry after backpressure.
-      await axios.post(
-        `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
-        requestBody,
-        {
-          headers: authHeaders({
-            "Content-Type": "application/json",
-          }),
-        }
-      );
+      await axios.post(url, requestBody, { headers });
       return;
     }
-    console.error("Error adding item to the collection:", error);
+    console.error("Error deleting item from the collection:", error);
     throw error;
   }
 }
