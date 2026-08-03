@@ -16,13 +16,26 @@ class Network {
   static async addItem(collection, root, location, metrics, reference) {}
 
   /**
+   * Deletes an item from a collection at a specific location in the network.
+   * If the operation fails, it retries with a different peer.
+   * @param {string} collection - The name of the collection.
+   * @param {string} root - The targeted root set.
+   * @param {string} location - The location identifier within the collection.
+   * @param {string} reference - The unique identifier of the item to delete.
+   * @returns {Promise<void>}
+   */
+  static async deleteItem(collection, root, location, reference) {}
+
+  /**
    * Retrieves a set of items from a collection at a specific location in the network.
    * The method selects the appropriate peer(s) to handle the request.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
+   * @param {number} depth - Path-fill budget: 2 to let the first peer fill from
+   *   its neighbors, 0 to follow a contact redirect instead.
    * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
    */
-  static async getSet(collection, location) {}
+  static async getSet(collection, location, depth) {}
 }
 
 export { Network };

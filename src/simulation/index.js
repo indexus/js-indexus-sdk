@@ -2,6 +2,7 @@ import { API as BaseAPI } from "../model/index.js";
 
 import { pingPeer } from "./pingPeer.js";
 import { addItem } from "./addItem.js";
+import { deleteItem } from "./deleteItem.js";
 import { getSet } from "./getSet.js";
 
 /**
@@ -15,6 +16,7 @@ class API extends BaseAPI {
 
 API.prototype.pingPeer = pingPeer;
 API.prototype.addItem = addItem;
+API.prototype.deleteItem = deleteItem;
 API.prototype.getSet = getSet;
 
 export { API };

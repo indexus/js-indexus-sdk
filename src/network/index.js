@@ -4,7 +4,17 @@ import { Network as BaseNetwork, API } from "../model/index.js";
 import { Table } from "./table.js";
 import { Peer } from "./peer.js";
 import { Throttler } from "./throttler.js";
-import { decodeUrl64, parent, ROOT, transform } from "../utilities/encoding.js";
+import { parent, ROOT, transform } from "../utilities/encoding.js";
+
+function randomRoutingKey(byteLength = 16) {
+  const bytes = new Uint8Array(byteLength);
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < byteLength; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return bytes;
+}
 
 /**
  * Represents the network abstraction that manages peer-to-peer interactions.
@@ -38,12 +48,21 @@ class Network extends BaseNetwork {
     this._cache = new Map();
     this._cacheSize = cacheSize;
 
+    // Stable per-session XOR routing key: first hop targets the nearest
+    // peer to this key (read + write ingress), not the data owner.
+    this._routingKey = randomRoutingKey(16);
+
     // Initialize the network by searching for peers
     this.discoverPeers();
   }
 
   getConcurrency() {
     return this._concurrency;
+  }
+
+  /** @returns {Uint8Array} session routing key used for ingress peer selection */
+  routingKey() {
+    return this._routingKey;
   }
 
   /**
@@ -81,33 +100,34 @@ class Network extends BaseNetwork {
 
   /**
    * Adds an item to a collection at a specific location in the network.
+   * Ingress uses the session routing key (neighbor), not the data owner.
    * If the operation fails, it retries with a different peer.
-   * @param {string} collection - The name of the collection.
-   * @param {string} root - The targeted root set.
-   * @param {string} location - The location identifier within the collection.
-   * @param {number[]} metrics - The metrics of the item to add.
-   * @param {string} reference - The unique identifier of the item to add.
-   * @returns {Promise<void>}
    */
   async addItem(collection, root, location, metrics, reference) {
     let attempts = this._attempts;
-
-    const id = transform(collection, location);
+    const tried = new Set();
 
     while (true) {
-      // Find the nearest peer to the id
-      let peer = this._table.nearest(id);
+      let peer = this._table.nearest(this._routingKey);
 
       if (!peer) {
         await this.discoverPeers();
-        peer = this._table.nearest(id);
+        peer = this._table.nearest(this._routingKey);
       }
 
+      // Fallback: try owner-direction peer if ingress peer already failed.
+      if (!peer || tried.has(peer.hash())) {
+        peer = this._table.nearest(transform(collection, location));
+      }
+
+      if (!peer) {
+        throw new Error("No peers available for write ingress.");
+      }
+      tried.add(peer.hash());
+
       try {
-        // Generate a unique key for addItem
         const addItemKey = `addItem:${collection}:${root}:${location}:${reference}`;
 
-        // Wrap the addItem API call with the throttler's enqueue method
         await this._throttler.enqueue(addItemKey, () =>
           this._api.addItem(
             this._protocol,
@@ -121,7 +141,6 @@ class Network extends BaseNetwork {
         );
         return;
       } catch (error) {
-        // If the request fails, remove the peer from the table and retry
         this._table.remove(peer.id());
         console.warn(
           `Failed to add item via peer ${peer.hash()}. Retrying with a different peer...`
@@ -129,7 +148,6 @@ class Network extends BaseNetwork {
 
         attempts--;
         if (attempts === 0) {
-          // If all attempts fail, throw an error
           throw new Error("Failed to add item after multiple attempts.");
         }
       }
@@ -137,38 +155,93 @@ class Network extends BaseNetwork {
   }
 
   /**
-   * Retrieves a set of items from a collection at a specific location in the network.
+   * Deletes an item from a collection at a specific location in the network.
+   * Same ingress as addItem: the session routing key, not the data owner.
    * If the operation fails, it retries with a different peer.
-   * Implements caching to store and retrieve sets efficiently.
-   * Prevents multiple simultaneous getSet calls with the same collection and location.
-   * @param {string} collection - The name of the collection.
-   * @param {string} location - The location identifier within the collection.
-   * @returns {Promise<any>} - A promise that resolves with the retrieved set of items.
    */
-  async getSet(collection, location) {
+  async deleteItem(collection, root, location, reference) {
+    let attempts = this._attempts;
+    const tried = new Set();
+
+    while (true) {
+      let peer = this._table.nearest(this._routingKey);
+
+      if (!peer) {
+        await this.discoverPeers();
+        peer = this._table.nearest(this._routingKey);
+      }
+
+      // Fallback: try owner-direction peer if ingress peer already failed.
+      if (!peer || tried.has(peer.hash())) {
+        peer = this._table.nearest(transform(collection, location));
+      }
+
+      if (!peer) {
+        throw new Error("No peers available for write ingress.");
+      }
+      tried.add(peer.hash());
+
+      try {
+        const deleteItemKey = `deleteItem:${collection}:${root}:${location}:${reference}`;
+
+        await this._throttler.enqueue(deleteItemKey, () =>
+          this._api.deleteItem(
+            this._protocol,
+            peer,
+            collection,
+            root,
+            location,
+            reference
+          )
+        );
+        // Drop our own copy for this location; ancestors expire on TTL.
+        this._cache.delete(`${collection}:${location}`);
+        return;
+      } catch (error) {
+        this._table.remove(peer.id());
+        console.warn(
+          `Failed to delete item via peer ${peer.hash()}. Retrying with a different peer...`
+        );
+
+        attempts--;
+        if (attempts === 0) {
+          throw new Error("Failed to delete item after multiple attempts.");
+        }
+      }
+    }
+  }
+
+  /**
+   * Retrieves a set. First hop uses the session routing key so the nearest
+   * neighbor can serve from cache / path-fill. Follows contact redirects and
+   * parent locations as before.
+   *
+   * `depth` is the path-fill budget handed to the first peer: 2 (default) lets
+   * it fetch and cache on our behalf, 0 asks for a contact redirect instead —
+   * useful for dense leaves whose payload is not worth caching at every hop.
+   */
+  async getSet(collection, location, depth = 2) {
     let attempts = this._attempts;
     let next = location;
 
     const cacheKey = `${collection}:${location}`;
 
-    // Check the cache before making a network request
     if (this._cache.has(cacheKey)) {
-      // Move the key to the end to mark it as recently used
       const cachedSet = this._cache.get(cacheKey);
       this._cache.delete(cacheKey);
       this._cache.set(cacheKey, cachedSet);
       return cachedSet;
     }
 
-    // Generate a unique key for getSet based on collection and location
     const getSetKey = `getSet:${collection}:${location}`;
 
-    // Use the throttler's enqueue method with the unique key
     return this._throttler.enqueue(getSetKey, async () => {
+      let useRoutingKey = true;
       while (true) {
-        const id = transform(collection, next);
+        const id = useRoutingKey
+          ? this._routingKey
+          : transform(collection, next);
 
-        // Find the nearest peer to the id
         let peer = this._table.nearest(id);
 
         if (!peer) {
@@ -177,12 +250,12 @@ class Network extends BaseNetwork {
         }
 
         try {
-          // Wrap the getSet API call with the throttler's enqueue method
           const response = await this._api.getSet(
             this._protocol,
             peer,
             collection,
-            location
+            location,
+            depth
           );
 
           if (
@@ -190,17 +263,18 @@ class Network extends BaseNetwork {
             response.contact.hash() !== peer.hash()
           ) {
             this._table.insert(response.contact.id(), response.contact);
-            if (response.set === null) continue;
+            if (response.set === null) {
+              // Follow toward owner / path-fill contact.
+              useRoutingKey = false;
+              continue;
+            }
           }
 
           if (response.set !== null) {
-            // Before adding to cache, check if cache is at capacity
             if (this._cache.size >= this._cacheSize) {
-              // Remove the least recently used (first inserted) item
               const firstKey = this._cache.keys().next().value;
               this._cache.delete(firstKey);
             }
-            // Add the new set to the cache and mark it as recently used
             this._cache.set(cacheKey, response.set);
             return response.set;
           }
@@ -209,8 +283,8 @@ class Network extends BaseNetwork {
             return [];
           }
           next = parent(next);
+          useRoutingKey = true;
         } catch (error) {
-          // If the request fails, remove the peer from the table and retry
           this._table.remove(peer.id());
           console.warn(
             `Failed to get set via peer ${peer.hash()}. Retrying with a different peer...`
@@ -218,7 +292,6 @@ class Network extends BaseNetwork {
 
           attempts--;
           if (attempts === 0) {
-            // If all attempts fail, throw an error
             throw new Error("Failed to retrieve set after multiple attempts.");
           }
         }

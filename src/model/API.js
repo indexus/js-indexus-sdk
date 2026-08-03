@@ -26,14 +26,28 @@ class API {
   async addItem(protocol, peer, collection, location, metrics, reference) {}
 
   /**
+   * Deletes an item from a collection at a specific location on a peer.
+   * @param {string} protocol - Protocol to use to contact the peer http/https.
+   * @param {Peer} peer - The peer holding the ingress for the deletion.
+   * @param {string} collection - The name of the collection.
+   * @param {string} root - The targeted root set.
+   * @param {string} location - The location identifier within the collection.
+   * @param {string} reference - The unique identifier of the item to delete.
+   * @returns {Promise<any>} - A promise that resolves when the deletion is accepted.
+   */
+  async deleteItem(protocol, peer, collection, root, location, reference) {}
+
+  /**
    * Retrieves a set of items from a collection at a specific location on a peer.
    * @param {string} protocol - Protocol to use to contact the peer http/https.
    * @param {Peer} peer - The peer from which to retrieve the set.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
+   * @param {number} depth - Path-fill budget: 2 to let the peer fill from its
+   *   neighbors, 0 to ask for a contact redirect.
    * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
    */
-  async getSet(protocol, peer, collection, location) {}
+  async getSet(protocol, peer, collection, location, depth) {}
 }
 
 export { API };

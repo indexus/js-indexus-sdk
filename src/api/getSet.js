@@ -5,6 +5,7 @@ import { Item } from "../entities/item.js";
 import { Set } from "../entities/set.js";
 import { Peer } from "../network/peer.js";
 import { getHostFromIP } from "../utilities/network.js";
+import { authHeaders } from "./authHeaders.js";
 
 /**
  * Retrieves a set from a collection at a specified location.
@@ -13,20 +14,22 @@ import { getHostFromIP } from "../utilities/network.js";
  * @param {Peer} peer - The peer to contact.
  * @param {string} collection - The ID of the collection.
  * @param {string} location - The location within the collection.
+ * @param {number} depth - Path-fill budget: 2 lets the peer fetch from its own
+ *   neighbors and cache the result, 0 asks for a contact redirect instead.
  * @returns {Promise<Object>} - The response from the server, including the set data.
  */
-export async function getSet(protocol, peer, collection, location) {
+export async function getSet(protocol, peer, collection, location, depth = 2) {
   // Construct the GET request URL
   const url = `${protocol}://${getHostFromIP(
     peer.ip()
   )}:${peer.port()}/set?collection=${encodeURIComponent(
     collection
-  )}&location=${encodeURIComponent(location)}`;
+  )}&location=${encodeURIComponent(location)}&depth=${depth}`;
 
   try {
     // Make the GET request to retrieve the set from the collection
     const response = await axios.get(url, {
-      headers: {},
+      headers: authHeaders(),
     });
 
     // Parse the JSON response
