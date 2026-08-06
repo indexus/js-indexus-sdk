@@ -33,11 +33,14 @@ export async function pingPeer(protocol, ip, port) {
 
     // Create a Peer instance from the contact data
     const contactData = data.contact;
+    // Missing client_ready (old binary) ⇒ assume ready; explicit false ⇒ joining.
+    const clientReady = data?.client_ready !== false;
     const contactPeer = new Peer(
       contactData.name,
       contactData.ips,
       contactData.port,
-      ip
+      ip,
+      clientReady
     );
     return contactPeer;
   } catch (error) {

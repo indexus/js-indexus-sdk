@@ -21,4 +21,9 @@ export { Spherical } from "./library/dimensions/spherical.js";
 export { Linear } from "./library/dimensions/linear.js";
 
 // Utilities
-export { encodeUrl64, decodeUrl64, parent } from "./utilities/encoding.js";
+export {
+  encodeUrl64,
+  decodeUrl64,
+  parent,
+  transform,
+} from "./utilities/encoding.js";

@@ -4,7 +4,7 @@ import { Network as BaseNetwork, API } from "../model/index.js";
 import { Table } from "./table.js";
 import { Peer } from "./peer.js";
 import { Throttler } from "./throttler.js";
-import { parent, ROOT, transform } from "../utilities/encoding.js";
+import { encodeUrl64, parent, ROOT, transform } from "../utilities/encoding.js";
 
 function randomRoutingKey(byteLength = 16) {
   const bytes = new Uint8Array(byteLength);
@@ -48,12 +48,20 @@ class Network extends BaseNetwork {
     this._cache = new Map();
     this._cacheSize = cacheSize;
 
-    // Stable per-session XOR routing key: first hop targets the nearest
-    // peer to this key (read + write ingress), not the data owner.
+    // Client identity in the XOR space — used as /neighbors origin and as
+    // first-hop for reads (path-fill / cache). Writes target the item key.
     this._routingKey = randomRoutingKey(16);
 
-    // Initialize the network by searching for peers
-    this.discoverPeers();
+    // Initialize the network by searching for peers (await via whenReady / getSet).
+    this._ready = this.discoverPeers();
+  }
+
+  /**
+   * Resolves once the initial bootstrap peer discovery attempt finishes.
+   * @returns {Promise<void>}
+   */
+  whenReady() {
+    return this._ready ?? Promise.resolve();
   }
 
   getConcurrency() {
@@ -67,17 +75,20 @@ class Network extends BaseNetwork {
 
   /**
    * Initializes the network by searching for peers and populating the routing table.
+   * Bootstraps are pinged, then each is asked for neighbors of this client's key
+   * so the table is not stuck on a single entry point.
    */
   async discoverPeers() {
     try {
       const bootstraps = [];
 
-      // Wrap each pingPeer call with the throttler's enqueue method
       const tasks = this._hosts.map((host) =>
         this._throttler.enqueue(`pingPeer:${host}`, async () => {
           try {
             const [ip, port] = host.split("|");
             const peer = await this._api.pingPeer(this._protocol, ip, port);
+            // Bootstrap seeds stay in the table even while joining so discovery
+            // has an entry point; writes still skip clientReady=false hops.
             bootstraps.push(peer);
           } catch (error) {
             console.warn(`Failed to add bootstrap peer with host ${host}.`);
@@ -85,39 +96,116 @@ class Network extends BaseNetwork {
         })
       );
 
-      // Wait for all throttled pingPeer tasks to complete
       await Promise.all(tasks);
 
       if (bootstraps.length === 0) {
-        // If all attempts fail, throw an error
         throw new Error("Failed to find peers with bootstrap hosts.");
       }
-      bootstraps.forEach((peer) => this._table.insert(peer.id(), peer));
+      bootstraps.forEach((peer) => {
+        if (peer.clientReady && peer.clientReady() === false) {
+          // Keep seed reachable for rediscovery, but not as a write hop.
+          this._joining = this._joining || new Map();
+          this._joining.set(peer.hash(), peer);
+          return;
+        }
+        this._table.insert(peer.id(), peer);
+      });
+
+      const origin = encodeUrl64(this._routingKey);
+      const expand = bootstraps.map((peer) =>
+        this._throttler.enqueue(`neighbors:${peer.hash()}`, async () => {
+          try {
+            if (typeof this._api.getNeighbors !== "function") return;
+            const neighbors = await this._api.getNeighbors(
+              this._protocol,
+              peer,
+              origin
+            );
+            for (const n of neighbors) {
+              // Neighbors do not carry client_ready — ping before advertising
+              // as a write hop so joining spawned nodes stay invisible.
+              try {
+                const live = await this._api.pingPeer(
+                  this._protocol,
+                  n.ip(),
+                  n.port()
+                );
+                if (live.clientReady && live.clientReady() === false) {
+                  this._joining = this._joining || new Map();
+                  this._joining.set(live.hash(), live);
+                  continue;
+                }
+                this._table.insert(live.id(), live);
+              } catch {
+                // Unreachable neighbour — skip.
+              }
+            }
+          } catch (error) {
+            // Neighbor expansion is best-effort; bootstrap alone still works.
+          }
+        })
+      );
+      await Promise.all(expand);
+
+      // Promote peers that finished mirroring since last discover.
+      if (this._joining && this._joining.size) {
+        for (const [hash, peer] of [...this._joining]) {
+          try {
+            const live = await this._api.pingPeer(
+              this._protocol,
+              peer.ip(),
+              peer.port()
+            );
+            if (!live.clientReady || live.clientReady() !== false) {
+              this._table.insert(live.id(), live);
+              this._joining.delete(hash);
+            }
+          } catch {
+            // Still booting or gone.
+          }
+        }
+      }
     } catch (error) {
       console.error("Error initializing peers:", error);
     }
   }
 
   /**
+   * First hop for a write: peer whose id is closest to transform(collection, location).
+   * Keys are effectively random in XOR space, so load spreads across the mesh.
+   * Peers still joining (client_ready=false) are never selected.
+   */
+  _writePeer(collection, location, tried) {
+    const key = transform(collection, location);
+    let peer = this._table.nearest(key);
+    if (peer && (tried.has(peer.hash()) || (peer.clientReady && peer.clientReady() === false))) {
+      peer = null;
+    }
+    // Fallback: any other known peer near the session key (still not sticky
+    // to bootstrap unless it is the only contact).
+    if (!peer) {
+      peer = this._table.nearest(this._routingKey);
+      if (peer && (tried.has(peer.hash()) || (peer.clientReady && peer.clientReady() === false))) {
+        peer = null;
+      }
+    }
+    return peer;
+  }
+
+  /**
    * Adds an item to a collection at a specific location in the network.
-   * Ingress uses the session routing key (neighbor), not the data owner.
-   * If the operation fails, it retries with a different peer.
+   * Ingress targets the peer nearest the item key, not a fixed bootstrap.
    */
   async addItem(collection, root, location, metrics, reference) {
     let attempts = this._attempts;
     const tried = new Set();
 
     while (true) {
-      let peer = this._table.nearest(this._routingKey);
+      let peer = this._writePeer(collection, location, tried);
 
       if (!peer) {
         await this.discoverPeers();
-        peer = this._table.nearest(this._routingKey);
-      }
-
-      // Fallback: try owner-direction peer if ingress peer already failed.
-      if (!peer || tried.has(peer.hash())) {
-        peer = this._table.nearest(transform(collection, location));
+        peer = this._writePeer(collection, location, tried);
       }
 
       if (!peer) {
@@ -141,7 +229,19 @@ class Network extends BaseNetwork {
         );
         return;
       } catch (error) {
-        this._table.remove(peer.id());
+        const msg = String(error?.message || error || "");
+        // Joining nodes refuse with ErrJoining — park them for rediscovery
+        // instead of dropping the contact (they become routable after publish).
+        if (/joining ownership|still joining/i.test(msg)) {
+          if (typeof peer.setClientReady === "function") {
+            peer.setClientReady(false);
+          }
+          this._joining = this._joining || new Map();
+          this._joining.set(peer.hash(), peer);
+          this._table.remove(peer.id());
+        } else {
+          this._table.remove(peer.id());
+        }
         console.warn(
           `Failed to add item via peer ${peer.hash()}. Retrying with a different peer...`
         );
@@ -156,24 +256,18 @@ class Network extends BaseNetwork {
 
   /**
    * Deletes an item from a collection at a specific location in the network.
-   * Same ingress as addItem: the session routing key, not the data owner.
-   * If the operation fails, it retries with a different peer.
+   * Same ingress as addItem: peer nearest the item key.
    */
   async deleteItem(collection, root, location, reference) {
     let attempts = this._attempts;
     const tried = new Set();
 
     while (true) {
-      let peer = this._table.nearest(this._routingKey);
+      let peer = this._writePeer(collection, location, tried);
 
       if (!peer) {
         await this.discoverPeers();
-        peer = this._table.nearest(this._routingKey);
-      }
-
-      // Fallback: try owner-direction peer if ingress peer already failed.
-      if (!peer || tried.has(peer.hash())) {
-        peer = this._table.nearest(transform(collection, location));
+        peer = this._writePeer(collection, location, tried);
       }
 
       if (!peer) {
@@ -213,14 +307,11 @@ class Network extends BaseNetwork {
 
   /**
    * Retrieves a set. First hop uses the session routing key so the nearest
-   * neighbor can serve from cache / path-fill. Follows contact redirects and
-   * parent locations as before.
-   *
-   * `depth` is the path-fill budget handed to the first peer: 2 (default) lets
-   * it fetch and cache on our behalf, 0 asks for a contact redirect instead —
-   * useful for dense leaves whose payload is not worth caching at every hop.
+   * neighbor is the ingress seed (traffic spread). deep=true asks that peer
+   * to path-fill recursively into its LRU; deep=false asks for a contact
+   * redirect only.
    */
-  async getSet(collection, location, depth = 2) {
+  async getSet(collection, location, deep = true) {
     let attempts = this._attempts;
     let next = location;
 
@@ -236,6 +327,7 @@ class Network extends BaseNetwork {
     const getSetKey = `getSet:${collection}:${location}`;
 
     return this._throttler.enqueue(getSetKey, async () => {
+      await this.whenReady();
       let useRoutingKey = true;
       while (true) {
         const id = useRoutingKey
@@ -249,13 +341,17 @@ class Network extends BaseNetwork {
           peer = this._table.nearest(id);
         }
 
+        if (!peer) {
+          throw new Error("Failed to find peers with bootstrap hosts.");
+        }
+
         try {
           const response = await this._api.getSet(
             this._protocol,
             peer,
             collection,
             location,
-            depth
+            deep
           );
 
           if (
@@ -296,6 +392,27 @@ class Network extends BaseNetwork {
           }
         }
       }
+    });
+  }
+
+  /**
+   * Batch getSets via the session routing-key ingress seed (same distribution
+   * as getSet). deep defaults true so the seed path-fills misses into its LRU.
+   */
+  async getSets(collection, locations, options = {}) {
+    await this.whenReady();
+    let peer = this._table.nearest(this._routingKey);
+    if (!peer) {
+      await this.discoverPeers();
+      peer = this._table.nearest(this._routingKey);
+    }
+    if (!peer) {
+      throw new Error("Failed to find peers with bootstrap hosts.");
+    }
+    const deep = options.deep !== false;
+    return this._api.getSets(this._protocol, peer, collection, locations, {
+      ...options,
+      deep,
     });
   }
 }

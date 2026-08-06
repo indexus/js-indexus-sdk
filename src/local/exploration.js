@@ -21,13 +21,18 @@ export async function run() {
 }
 
 export function prepare() {
-  this.current().indexed.sort();
+  const layer = this.current();
+  if (!layer?.indexed) {
+    // Defensive: level walked past allocated layers (empty collection edge).
+    return false;
+  }
+  layer.indexed.sort();
 
   let selected = 0;
   let count = 0;
   let items = 0;
 
-  for (const element of this.current().indexed.list) {
+  for (const element of layer.indexed.list) {
     if (
       this.level > 0 &&
       (element.distance() > this.previous().radius ||
@@ -40,51 +45,46 @@ export function prepare() {
       items++;
     }
 
-    this.current().selected.add(element);
+    layer.selected.add(element);
     selected++;
     count += element.count();
     this.monitoring.send(new Monitoring(this.level, State.Selected, element));
   }
 
-  this.current().indexed.remove(selected, count);
+  layer.indexed.remove(selected, count);
 
   if (this.level === 0) {
-    this.current().final = false;
+    layer.final = false;
     return true;
   }
 
   if (
-    this.current().indexed.count === 0 ||
-    this.current().indexed.list[0].distance() > this.previous().radius
+    layer.indexed.count === 0 ||
+    layer.indexed.list[0].distance() > this.previous().radius
   ) {
-    this.current().radius = this.previous().radius;
+    layer.radius = this.previous().radius;
   } else {
-    this.current().radius = this.current().indexed.list[0].distance();
+    layer.radius = layer.indexed.list[0].distance();
   }
 
-  this.previous().waiting =
-    this.current().indexed.count + this.current().waiting;
+  this.previous().waiting = layer.indexed.count + layer.waiting;
   this.previous().loaded.count =
-    this.current().indexed.count +
-    this.current().selected.count +
-    this.current().loaded.count;
+    layer.indexed.count + layer.selected.count + layer.loaded.count;
 
   const predicted =
-    this.current().loaded.count +
-    this.current().selected.count -
-    this.current().waiting;
-  this.current().final =
-    this.current().final &&
-    items === selected &&
-    this.level + 1 === this.sets.length;
+    layer.loaded.count + layer.selected.count - layer.waiting;
+  layer.final =
+    layer.final && items === selected && this.level + 1 === this.sets.length;
 
-  return (
-    predicted >= this.limit || this.current().radius === this.first().radius
-  );
+  return predicted >= this.limit || layer.radius === this.first().radius;
 }
 
 export async function query() {
   const selectedList = this.current().selected.list;
+  // Always allocate the next layer up-front. Empty getSet responses (missing
+  // collection / no children) never call next().indexed.add, and run() would
+  // then level++ into an undefined layer.
+  this.next();
 
   // Define the iterator function for each element
   const process = async (element) => {

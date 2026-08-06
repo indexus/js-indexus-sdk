@@ -6,44 +6,33 @@ import { Set } from "../entities/set.js";
 import { Peer } from "../network/peer.js";
 
 /**
- * Retrieves a set from a collection at a specified location.
+ * Simulation getSet — mirrors production deep path-fill.
  *
  * @param {Peer} peer - The peer to contact.
  * @param {string} collection - The ID of the collection.
  * @param {string} location - The location within the collection.
- * @param {number} depth - Path-fill budget, mirrors the real API.
+ * @param {boolean} deep - Path-fill on/off.
  * @returns {Promise<Object>} - The response from the server, including the set data.
  */
-export async function getSet(peer, collection, location, depth = 2) {
-  // Construct the GET request URL
+export async function getSet(peer, collection, location, deep = true) {
   const url = `http://127.0.0.1:2100/set?collection=${encodeURIComponent(
     collection
-  )}&location=${encodeURIComponent(location)}&depth=${depth}`;
+  )}&location=${encodeURIComponent(location)}&deep=${deep ? "true" : "false"}`;
 
   try {
-    // Make the GET request to retrieve the set from the collection
     const response = await axios.get(url, {
       headers: {
         Destination: peer.hash(),
       },
     });
 
-    // Parse the JSON response
     const data = response.data;
 
-    /**
-     * Parses the set data and constructs Element instances.
-     * @param {Object.<string, number>} setData - The set data from the response.
-     * @param {string} collection - The name of the collection.
-     * @returns {Element[]} - An array of Element instances (Item or Set).
-     */
     const parseSet = (setData, collection) => {
       const elements = [];
 
       for (const [key, value] of Object.entries(setData)) {
         if (value.count === 1) {
-          // It's an Item
-          // Assuming the key is in the format 'hash:reference'
           const [hash, reference] = key.split(":");
           if (hash && reference) {
             elements.push(new Item(collection, hash, value.metrics, reference));
@@ -51,8 +40,6 @@ export async function getSet(peer, collection, location, depth = 2) {
             console.warn(`Invalid item key format: ${key}`);
           }
         } else {
-          // It's a Set
-          // Assuming the key is the hash, and value is the count
           const hash = key;
           const count = value.count;
           elements.push(new Set(collection, hash, count, value.metrics));
@@ -62,7 +49,6 @@ export async function getSet(peer, collection, location, depth = 2) {
       return elements;
     };
 
-    // Create a Peer instance from the contact data
     const contactData = data.contact;
     const contactPeer = new Peer(
       contactData.name,
@@ -71,17 +57,13 @@ export async function getSet(peer, collection, location, depth = 2) {
       contactData.ip
     );
 
-    // Parse the set data into Element instances
     const elements = data.set !== null ? parseSet(data.set, collection) : null;
 
-    // Return the structured object
     return {
       contact: contactPeer,
       set: elements,
     };
   } catch (error) {
-    // Handle and log errors
-    // console.error(`Error retrieving set from peer ${peer.hash()}:`, error);
     throw error;
   }
 }

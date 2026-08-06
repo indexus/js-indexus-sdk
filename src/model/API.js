@@ -43,11 +43,10 @@ class API {
    * @param {Peer} peer - The peer from which to retrieve the set.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
-   * @param {number} depth - Path-fill budget: 2 to let the peer fill from its
-   *   neighbors, 0 to ask for a contact redirect.
+   * @param {boolean} deep - Path-fill on/off (recurse to owner + fill LRU).
    * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
    */
-  async getSet(protocol, peer, collection, location, depth) {}
+  async getSet(protocol, peer, collection, location, deep) {}
 }
 
 export { API };
