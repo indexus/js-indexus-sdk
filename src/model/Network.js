@@ -31,11 +31,10 @@ class Network {
    * The method selects the appropriate peer(s) to handle the request.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
-   * @param {number} depth - Path-fill budget: 2 to let the first peer fill from
-   *   its neighbors, 0 to follow a contact redirect instead.
+   * @param {boolean} deep - Path-fill on/off (recurse to owner + fill LRU).
    * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
    */
-  static async getSet(collection, location, depth) {}
+  static async getSet(collection, location, deep) {}
 }
 
 export { Network };

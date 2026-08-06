@@ -1,0 +1,14 @@
+{
+  "name": "batch-loader-indexus",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Batch loader into indexus collection based on CSV",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "author": "Rémi Henriot",
+  "license": "MIT",
+  "dependencies": {
+    "js-indexus-sdk": "^1.0.16"
+  }
+}

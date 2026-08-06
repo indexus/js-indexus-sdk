@@ -789,11 +789,10 @@ class API$1 {
    * @param {Peer} peer - The peer from which to retrieve the set.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
-   * @param {number} depth - Path-fill budget: 2 to let the peer fill from its
-   *   neighbors, 0 to ask for a contact redirect.
+   * @param {boolean} deep - Path-fill on/off (recurse to owner + fill LRU).
    * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
    */
-  async getSet(protocol, peer, collection, location, depth) {}
+  async getSet(protocol, peer, collection, location, deep) {}
 }
 
 /**
@@ -828,11 +827,10 @@ class Network$1 {
    * The method selects the appropriate peer(s) to handle the request.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
-   * @param {number} depth - Path-fill budget: 2 to let the first peer fill from
-   *   its neighbors, 0 to follow a contact redirect instead.
+   * @param {boolean} deep - Path-fill on/off (recurse to owner + fill LRU).
    * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
    */
-  static async getSet(collection, location, depth) {}
+  static async getSet(collection, location, deep) {}
 }
 
 class Item$1 extends Item$2 {
@@ -2138,13 +2136,18 @@ async function run() {
 }
 
 function prepare() {
-  this.current().indexed.sort();
+  const layer = this.current();
+  if (!layer?.indexed) {
+    // Defensive: level walked past allocated layers (empty collection edge).
+    return false;
+  }
+  layer.indexed.sort();
 
   let selected = 0;
   let count = 0;
   let items = 0;
 
-  for (const element of this.current().indexed.list) {
+  for (const element of layer.indexed.list) {
     if (
       this.level > 0 &&
       (element.distance() > this.previous().radius ||
@@ -2157,51 +2160,46 @@ function prepare() {
       items++;
     }
 
-    this.current().selected.add(element);
+    layer.selected.add(element);
     selected++;
     count += element.count();
     this.monitoring.send(new Monitoring(this.level, State.Selected, element));
   }
 
-  this.current().indexed.remove(selected, count);
+  layer.indexed.remove(selected, count);
 
   if (this.level === 0) {
-    this.current().final = false;
+    layer.final = false;
     return true;
   }
 
   if (
-    this.current().indexed.count === 0 ||
-    this.current().indexed.list[0].distance() > this.previous().radius
+    layer.indexed.count === 0 ||
+    layer.indexed.list[0].distance() > this.previous().radius
   ) {
-    this.current().radius = this.previous().radius;
+    layer.radius = this.previous().radius;
   } else {
-    this.current().radius = this.current().indexed.list[0].distance();
+    layer.radius = layer.indexed.list[0].distance();
   }
 
-  this.previous().waiting =
-    this.current().indexed.count + this.current().waiting;
+  this.previous().waiting = layer.indexed.count + layer.waiting;
   this.previous().loaded.count =
-    this.current().indexed.count +
-    this.current().selected.count +
-    this.current().loaded.count;
+    layer.indexed.count + layer.selected.count + layer.loaded.count;
 
   const predicted =
-    this.current().loaded.count +
-    this.current().selected.count -
-    this.current().waiting;
-  this.current().final =
-    this.current().final &&
-    items === selected &&
-    this.level + 1 === this.sets.length;
+    layer.loaded.count + layer.selected.count - layer.waiting;
+  layer.final =
+    layer.final && items === selected && this.level + 1 === this.sets.length;
 
-  return (
-    predicted >= this.limit || this.current().radius === this.first().radius
-  );
+  return predicted >= this.limit || layer.radius === this.first().radius;
 }
 
 async function query() {
   const selectedList = this.current().selected.list;
+  // Always allocate the next layer up-front. Empty getSet responses (missing
+  // collection / no children) never call next().indexed.add, and run() would
+  // then level++ into an undefined layer.
+  this.next();
 
   // Define the iterator function for each element
   const process = async (element) => {
@@ -2796,8 +2794,9 @@ class Peer extends Peer$1 {
    * @param {Object.<string, null>} ips - An object containing the peer's IP addresses.
    * @param {number} port - The port number the peer is listening on.
    * @param {string} ip - The primary IP address of the peer.
+   * @param {boolean} [clientReady=true] - Whether clients may XOR-route writes here.
    */
-  constructor(hash, ips, port, ip) {
+  constructor(hash, ips, port, ip, clientReady = true) {
     super();
 
     this._id = decodeUrl64(hash);
@@ -2805,6 +2804,7 @@ class Peer extends Peer$1 {
     this._ips = ips;
     this._port = port;
     this._ip = ip;
+    this._clientReady = clientReady !== false;
   }
 
   /**
@@ -2845,6 +2845,20 @@ class Peer extends Peer$1 {
    */
   ip() {
     return this._ip;
+  }
+
+  /**
+   * Whether this peer is safe for client XOR write routing.
+   * Joining (spawned) nodes advertise false until ownership is mirrored.
+   * @returns {boolean}
+   */
+  clientReady() {
+    return this._clientReady !== false;
+  }
+
+  /** @param {boolean} ready */
+  setClientReady(ready) {
+    this._clientReady = !!ready;
   }
 }
 
@@ -3018,12 +3032,20 @@ class Network extends Network$1 {
     this._cache = new Map();
     this._cacheSize = cacheSize;
 
-    // Stable per-session XOR routing key: first hop targets the nearest
-    // peer to this key (read + write ingress), not the data owner.
+    // Client identity in the XOR space — used as /neighbors origin and as
+    // first-hop for reads (path-fill / cache). Writes target the item key.
     this._routingKey = randomRoutingKey(16);
 
-    // Initialize the network by searching for peers
-    this.discoverPeers();
+    // Initialize the network by searching for peers (await via whenReady / getSet).
+    this._ready = this.discoverPeers();
+  }
+
+  /**
+   * Resolves once the initial bootstrap peer discovery attempt finishes.
+   * @returns {Promise<void>}
+   */
+  whenReady() {
+    return this._ready ?? Promise.resolve();
   }
 
   getConcurrency() {
@@ -3037,17 +3059,20 @@ class Network extends Network$1 {
 
   /**
    * Initializes the network by searching for peers and populating the routing table.
+   * Bootstraps are pinged, then each is asked for neighbors of this client's key
+   * so the table is not stuck on a single entry point.
    */
   async discoverPeers() {
     try {
       const bootstraps = [];
 
-      // Wrap each pingPeer call with the throttler's enqueue method
       const tasks = this._hosts.map((host) =>
         this._throttler.enqueue(`pingPeer:${host}`, async () => {
           try {
             const [ip, port] = host.split("|");
             const peer = await this._api.pingPeer(this._protocol, ip, port);
+            // Bootstrap seeds stay in the table even while joining so discovery
+            // has an entry point; writes still skip clientReady=false hops.
             bootstraps.push(peer);
           } catch (error) {
             console.warn(`Failed to add bootstrap peer with host ${host}.`);
@@ -3055,39 +3080,116 @@ class Network extends Network$1 {
         })
       );
 
-      // Wait for all throttled pingPeer tasks to complete
       await Promise.all(tasks);
 
       if (bootstraps.length === 0) {
-        // If all attempts fail, throw an error
         throw new Error("Failed to find peers with bootstrap hosts.");
       }
-      bootstraps.forEach((peer) => this._table.insert(peer.id(), peer));
+      bootstraps.forEach((peer) => {
+        if (peer.clientReady && peer.clientReady() === false) {
+          // Keep seed reachable for rediscovery, but not as a write hop.
+          this._joining = this._joining || new Map();
+          this._joining.set(peer.hash(), peer);
+          return;
+        }
+        this._table.insert(peer.id(), peer);
+      });
+
+      const origin = encodeUrl64(this._routingKey);
+      const expand = bootstraps.map((peer) =>
+        this._throttler.enqueue(`neighbors:${peer.hash()}`, async () => {
+          try {
+            if (typeof this._api.getNeighbors !== "function") return;
+            const neighbors = await this._api.getNeighbors(
+              this._protocol,
+              peer,
+              origin
+            );
+            for (const n of neighbors) {
+              // Neighbors do not carry client_ready — ping before advertising
+              // as a write hop so joining spawned nodes stay invisible.
+              try {
+                const live = await this._api.pingPeer(
+                  this._protocol,
+                  n.ip(),
+                  n.port()
+                );
+                if (live.clientReady && live.clientReady() === false) {
+                  this._joining = this._joining || new Map();
+                  this._joining.set(live.hash(), live);
+                  continue;
+                }
+                this._table.insert(live.id(), live);
+              } catch {
+                // Unreachable neighbour — skip.
+              }
+            }
+          } catch (error) {
+            // Neighbor expansion is best-effort; bootstrap alone still works.
+          }
+        })
+      );
+      await Promise.all(expand);
+
+      // Promote peers that finished mirroring since last discover.
+      if (this._joining && this._joining.size) {
+        for (const [hash, peer] of [...this._joining]) {
+          try {
+            const live = await this._api.pingPeer(
+              this._protocol,
+              peer.ip(),
+              peer.port()
+            );
+            if (!live.clientReady || live.clientReady() !== false) {
+              this._table.insert(live.id(), live);
+              this._joining.delete(hash);
+            }
+          } catch {
+            // Still booting or gone.
+          }
+        }
+      }
     } catch (error) {
       console.error("Error initializing peers:", error);
     }
   }
 
   /**
+   * First hop for a write: peer whose id is closest to transform(collection, location).
+   * Keys are effectively random in XOR space, so load spreads across the mesh.
+   * Peers still joining (client_ready=false) are never selected.
+   */
+  _writePeer(collection, location, tried) {
+    const key = transform(collection, location);
+    let peer = this._table.nearest(key);
+    if (peer && (tried.has(peer.hash()) || (peer.clientReady && peer.clientReady() === false))) {
+      peer = null;
+    }
+    // Fallback: any other known peer near the session key (still not sticky
+    // to bootstrap unless it is the only contact).
+    if (!peer) {
+      peer = this._table.nearest(this._routingKey);
+      if (peer && (tried.has(peer.hash()) || (peer.clientReady && peer.clientReady() === false))) {
+        peer = null;
+      }
+    }
+    return peer;
+  }
+
+  /**
    * Adds an item to a collection at a specific location in the network.
-   * Ingress uses the session routing key (neighbor), not the data owner.
-   * If the operation fails, it retries with a different peer.
+   * Ingress targets the peer nearest the item key, not a fixed bootstrap.
    */
   async addItem(collection, root, location, metrics, reference) {
     let attempts = this._attempts;
     const tried = new Set();
 
     while (true) {
-      let peer = this._table.nearest(this._routingKey);
+      let peer = this._writePeer(collection, location, tried);
 
       if (!peer) {
         await this.discoverPeers();
-        peer = this._table.nearest(this._routingKey);
-      }
-
-      // Fallback: try owner-direction peer if ingress peer already failed.
-      if (!peer || tried.has(peer.hash())) {
-        peer = this._table.nearest(transform(collection, location));
+        peer = this._writePeer(collection, location, tried);
       }
 
       if (!peer) {
@@ -3111,7 +3213,19 @@ class Network extends Network$1 {
         );
         return;
       } catch (error) {
-        this._table.remove(peer.id());
+        const msg = String(error?.message || error || "");
+        // Joining nodes refuse with ErrJoining — park them for rediscovery
+        // instead of dropping the contact (they become routable after publish).
+        if (/joining ownership|still joining/i.test(msg)) {
+          if (typeof peer.setClientReady === "function") {
+            peer.setClientReady(false);
+          }
+          this._joining = this._joining || new Map();
+          this._joining.set(peer.hash(), peer);
+          this._table.remove(peer.id());
+        } else {
+          this._table.remove(peer.id());
+        }
         console.warn(
           `Failed to add item via peer ${peer.hash()}. Retrying with a different peer...`
         );
@@ -3126,24 +3240,18 @@ class Network extends Network$1 {
 
   /**
    * Deletes an item from a collection at a specific location in the network.
-   * Same ingress as addItem: the session routing key, not the data owner.
-   * If the operation fails, it retries with a different peer.
+   * Same ingress as addItem: peer nearest the item key.
    */
   async deleteItem(collection, root, location, reference) {
     let attempts = this._attempts;
     const tried = new Set();
 
     while (true) {
-      let peer = this._table.nearest(this._routingKey);
+      let peer = this._writePeer(collection, location, tried);
 
       if (!peer) {
         await this.discoverPeers();
-        peer = this._table.nearest(this._routingKey);
-      }
-
-      // Fallback: try owner-direction peer if ingress peer already failed.
-      if (!peer || tried.has(peer.hash())) {
-        peer = this._table.nearest(transform(collection, location));
+        peer = this._writePeer(collection, location, tried);
       }
 
       if (!peer) {
@@ -3183,14 +3291,11 @@ class Network extends Network$1 {
 
   /**
    * Retrieves a set. First hop uses the session routing key so the nearest
-   * neighbor can serve from cache / path-fill. Follows contact redirects and
-   * parent locations as before.
-   *
-   * `depth` is the path-fill budget handed to the first peer: 2 (default) lets
-   * it fetch and cache on our behalf, 0 asks for a contact redirect instead —
-   * useful for dense leaves whose payload is not worth caching at every hop.
+   * neighbor is the ingress seed (traffic spread). deep=true asks that peer
+   * to path-fill recursively into its LRU; deep=false asks for a contact
+   * redirect only.
    */
-  async getSet(collection, location, depth = 2) {
+  async getSet(collection, location, deep = true) {
     let attempts = this._attempts;
     let next = location;
 
@@ -3206,6 +3311,7 @@ class Network extends Network$1 {
     const getSetKey = `getSet:${collection}:${location}`;
 
     return this._throttler.enqueue(getSetKey, async () => {
+      await this.whenReady();
       let useRoutingKey = true;
       while (true) {
         const id = useRoutingKey
@@ -3219,13 +3325,17 @@ class Network extends Network$1 {
           peer = this._table.nearest(id);
         }
 
+        if (!peer) {
+          throw new Error("Failed to find peers with bootstrap hosts.");
+        }
+
         try {
           const response = await this._api.getSet(
             this._protocol,
             peer,
             collection,
             location,
-            depth
+            deep
           );
 
           if (
@@ -3266,6 +3376,27 @@ class Network extends Network$1 {
           }
         }
       }
+    });
+  }
+
+  /**
+   * Batch getSets via the session routing-key ingress seed (same distribution
+   * as getSet). deep defaults true so the seed path-fills misses into its LRU.
+   */
+  async getSets(collection, locations, options = {}) {
+    await this.whenReady();
+    let peer = this._table.nearest(this._routingKey);
+    if (!peer) {
+      await this.discoverPeers();
+      peer = this._table.nearest(this._routingKey);
+    }
+    if (!peer) {
+      throw new Error("Failed to find peers with bootstrap hosts.");
+    }
+    const deep = options.deep !== false;
+    return this._api.getSets(this._protocol, peer, collection, locations, {
+      ...options,
+      deep,
     });
   }
 }
@@ -9275,11 +9406,14 @@ async function pingPeer(protocol, ip, port) {
 
     // Create a Peer instance from the contact data
     const contactData = data.contact;
+    // Missing client_ready (old binary) ⇒ assume ready; explicit false ⇒ joining.
+    const clientReady = data?.client_ready !== false;
     const contactPeer = new Peer(
       contactData.name,
       contactData.ips,
       contactData.port,
-      ip
+      ip,
+      clientReady
     );
     return contactPeer;
   } catch (error) {
@@ -9287,6 +9421,35 @@ async function pingPeer(protocol, ip, port) {
     console.error("Error pinging the host:", error);
     throw error;
   }
+}
+
+/**
+ * Fetch XOR-nearest neighbors of `origin` (url64 peer name) from a peer.
+ * @param {string} protocol
+ * @param {Peer} peer
+ * @param {string} origin - url64-encoded origin id used as the query key
+ * @returns {Promise<Peer[]>}
+ */
+async function getNeighbors(protocol, peer, origin) {
+  const response = await axios$1.get(
+    `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/neighbors`,
+    {
+      params: { origin },
+      headers: authHeaders({
+        "Content-Type": "application/json",
+      }),
+    }
+  );
+
+  const list = response.data?.neighbors || [];
+  return list.map((contactData) => {
+    const ips = contactData.ips || {};
+    const ip =
+      contactData.ip ||
+      Object.keys(ips)[0] ||
+      peer.ip();
+    return new Peer(contactData.name, ips, contactData.port, ip);
+  });
 }
 
 /**
@@ -9409,28 +9572,25 @@ async function deleteItem(
  * Retrieves a set from a collection at a specified location.
  *
  * @param {string} protocol - Protocol to use to contact the peer http/https.
- * @param {Peer} peer - The peer to contact.
+ * @param {Peer} peer - The peer to contact (ingress seed).
  * @param {string} collection - The ID of the collection.
  * @param {string} location - The location within the collection.
- * @param {number} depth - Path-fill budget: 2 lets the peer fetch from its own
- *   neighbors and cache the result, 0 asks for a contact redirect instead.
+ * @param {boolean} deep - Path-fill: true lets the peer recurse to the owner
+ *   and fill its LRU; false asks for a contact redirect only.
  * @returns {Promise<Object>} - The response from the server, including the set data.
  */
-async function getSet(protocol, peer, collection, location, depth = 2) {
-  // Construct the GET request URL
+async function getSet(protocol, peer, collection, location, deep = true) {
   const url = `${protocol}://${getHostFromIP(
     peer.ip()
   )}:${peer.port()}/set?collection=${encodeURIComponent(
     collection
-  )}&location=${encodeURIComponent(location)}&depth=${depth}`;
+  )}&location=${encodeURIComponent(location)}&deep=${deep ? "true" : "false"}`;
 
   try {
-    // Make the GET request to retrieve the set from the collection
     const response = await axios$1.get(url, {
       headers: authHeaders(),
     });
 
-    // Parse the JSON response
     const data = response.data;
 
     /**
@@ -9444,8 +9604,6 @@ async function getSet(protocol, peer, collection, location, depth = 2) {
 
       for (const [key, value] of Object.entries(setData)) {
         if (value.count === 1) {
-          // It's an Item
-          // Assuming the key is in the format 'hash:reference'
           const [hash, reference] = key.split(":");
           if (hash && reference) {
             elements.push(new Item$1(collection, hash, value.metrics, reference));
@@ -9453,8 +9611,6 @@ async function getSet(protocol, peer, collection, location, depth = 2) {
             console.warn(`Invalid item key format: ${key}`);
           }
         } else {
-          // It's a Set
-          // Assuming the key is the hash, and value is the count
           const hash = key;
           const count = value.count;
           elements.push(new Set$1(collection, hash, count, value.metrics));
@@ -9464,7 +9620,6 @@ async function getSet(protocol, peer, collection, location, depth = 2) {
       return elements;
     };
 
-    // Create a Peer instance from the contact data
     const contactData = data.contact;
     const contactPeer = new Peer(
       contactData.name,
@@ -9473,19 +9628,340 @@ async function getSet(protocol, peer, collection, location, depth = 2) {
       contactData.ip
     );
 
-    // Parse the set data into Element instances
     const elements = data.set !== null ? parseSet(data.set, collection) : null;
 
-    // Return the structured object
     return {
       contact: contactPeer,
       set: elements,
     };
   } catch (error) {
-    // Handle and log errors
     console.error(`Error retrieving set from peer ${peer.hash()}:`, error);
     throw error;
   }
+}
+
+/**
+ * Single-item rows use either `childHash:itemReference` or a bare hash segment
+ * (Go shrink / leaf entries). Only the colon form existed historically in JS.
+ */
+function itemKeyParts(key) {
+  if (typeof key !== "string" || key.length === 0) {
+    return null;
+  }
+  const i = key.indexOf(":");
+  if (i <= 0) {
+    return { hash: key, reference: key };
+  }
+  const hash = key.slice(0, i);
+  const reference = key.slice(i + 1);
+  if (!reference) {
+    return { hash, reference: hash };
+  }
+  return { hash, reference };
+}
+
+/**
+ * @param {Object<string, { count: number, metrics?: number[] }>} setData
+ * @param {string} collection
+ * @returns {Array<Item|Set>}
+ */
+function parseSetMap(setData, collection) {
+  if (!setData || typeof setData !== "object") {
+    return [];
+  }
+  const elements = [];
+  for (const [key, value] of Object.entries(setData)) {
+    if (!value || typeof value.count !== "number") {
+      continue;
+    }
+    if (value.count === 1) {
+      const parts = itemKeyParts(key);
+      if (!parts) {
+        continue;
+      }
+      elements.push(
+        new Item$1(collection, parts.hash, value.metrics, parts.reference)
+      );
+    } else {
+      elements.push(new Set$1(collection, key, value.count, value.metrics));
+    }
+  }
+  return elements;
+}
+
+/**
+ * Binary encoder for GET /sets (go-indexus-core domain.Collection.GetMultiple).
+ *
+ * Stream = concatenated blocks (multi-owner responses are concatenated too).
+ * Each non-empty depth bucket:
+ *   - u8 depthIndex           // keys have byte length depthIndex + 1
+ *   - u32 BE entry count `size`
+ *   - `propertyCount` × u8    // bits.Len(max) per packed column (may be 0)
+ *   - `size * (depthIndex+1)` key bytes (UTF-8; typically ASCII hashes)
+ *   - For each property j: ceil(size * bitCounts[j] / 8) bytes — packed ints MSB-first
+ *
+ * Server strips `:reference` from keys using the colon (not a fixed prefix length).
+ * Packed ints match Go encodeBits / sequential MSB bitstream (same order as metrics columns).
+ */
+
+/** Matches http/p2p/p2p.go GetMultiple defaults. */
+const SETS_BINARY_PROPERTY_COUNT = 4;
+
+/** Inverse of metricInt scaling in go-indexus-core/http/p2p/p2p.go */
+const DEFAULT_SETS_METRIC_DECODE = [
+  { propIndex: 1, metricIndex: 2, divisor: 1 },
+  { propIndex: 2, metricIndex: 3, divisor: 1_000_000 },
+  { propIndex: 3, metricIndex: 4, divisor: 1_000_000 },
+];
+
+function readU32BE(u8, offset) {
+  return (
+    (u8[offset] << 24) |
+    (u8[offset + 1] << 16) |
+    (u8[offset + 2] << 8) |
+    u8[offset + 3]
+  ) >>> 0;
+}
+
+/**
+ * Decode `count` unsigned integers packed `bitsPerValue` wide (MSB-first), Go encodeBits order.
+ */
+function decodePackedInts(u8, offset, count, bitsPerValue) {
+  if (bitsPerValue <= 0) {
+    return { values: new Array(count).fill(0), bytesConsumed: 0 };
+  }
+  const values = new Array(count);
+  let bitPos = 0;
+  const totalBits = count * bitsPerValue;
+  const bytesConsumed = Math.ceil(totalBits / 8);
+
+  if (offset + bytesConsumed > u8.length) {
+    throw new Error(
+      `decodePackedInts: need ${bytesConsumed} bytes at offset ${offset}, len=${u8.length}`
+    );
+  }
+
+  for (let i = 0; i < count; i++) {
+    let v = 0n;
+    for (let b = 0; b < bitsPerValue; b++) {
+      const globalBit = bitPos;
+      bitPos++;
+      const byteIdx = offset + (globalBit >> 3);
+      const bitInByte = globalBit & 7;
+      const bit = (u8[byteIdx] >> (7 - bitInByte)) & 1;
+      v = (v << 1n) | BigInt(bit);
+    }
+    values[i] = Number(v);
+  }
+
+  return { values, bytesConsumed };
+}
+
+/**
+ * @param {ArrayBuffer | Uint8Array} buffer
+ * @param {{ propertyCount?: number }} options
+ */
+function decodeSetsBinary(buffer, options = {}) {
+  const u8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const propertyCount =
+    Number(options.propertyCount) > 0
+      ? Math.floor(Number(options.propertyCount))
+      : SETS_BINARY_PROPERTY_COUNT;
+
+  const blocks = [];
+  let offset = 0;
+  const decoder = new TextDecoder("utf-8");
+
+  while (offset < u8.length) {
+    const depthIndex = u8[offset++];
+    if (offset + 4 > u8.length) {
+      throw new Error("decodeSetsBinary: truncated header (size)");
+    }
+    const size = readU32BE(u8, offset);
+    offset += 4;
+
+    if (offset + propertyCount > u8.length) {
+      throw new Error("decodeSetsBinary: truncated header (bitCounts)");
+    }
+    const bitCounts = [];
+    for (let j = 0; j < propertyCount; j++) {
+      bitCounts.push(u8[offset++]);
+    }
+
+    const keyLen = depthIndex + 1;
+    const keysTotalBytes = size * keyLen;
+    if (offset + keysTotalBytes > u8.length) {
+      throw new Error("decodeSetsBinary: truncated keys segment");
+    }
+
+    const keys = [];
+    for (let i = 0; i < size; i++) {
+      const start = offset + i * keyLen;
+      keys.push(decoder.decode(u8.subarray(start, start + keyLen)));
+    }
+    offset += keysTotalBytes;
+
+    const columns = [];
+    for (let j = 0; j < propertyCount; j++) {
+      const { values, bytesConsumed } = decodePackedInts(
+        u8,
+        offset,
+        size,
+        bitCounts[j]
+      );
+      columns.push(values);
+      offset += bytesConsumed;
+    }
+
+    blocks.push({
+      depthIndex,
+      size,
+      keys,
+      columns,
+      bitCounts,
+    });
+  }
+
+  return { blocks, propertyCount };
+}
+
+function buildMetricsRow(columns, rowIndex, decodeRules = DEFAULT_SETS_METRIC_DECODE) {
+  const metrics = [];
+  for (let r = 0; r < decodeRules.length; r++) {
+    const rule = decodeRules[r];
+    const raw = columns[rule.propIndex]?.[rowIndex];
+    const num = Number.isFinite(raw) ? raw : 0;
+    metrics[rule.metricIndex] = rule.divisor === 1 ? num : num / rule.divisor;
+  }
+  return metrics;
+}
+
+/**
+ * Same Abelian-shaped map as JSON `/set` payloads (`{ count, metrics }`), keyed like GetMultiple output.
+ */
+function binaryBlocksToRawMap(blocks, decodeRules = DEFAULT_SETS_METRIC_DECODE) {
+  const shaped = {};
+  for (let b = 0; b < blocks.length; b++) {
+    const block = blocks[b];
+    const { size, keys, columns } = block;
+    const counts = columns[0];
+    if (!counts || counts.length !== size) continue;
+
+    for (let i = 0; i < size; i++) {
+      const key = keys[i];
+      shaped[key] = {
+        count: counts[i],
+        metrics: buildMetricsRow(columns, i, decodeRules),
+      };
+    }
+  }
+  return shaped;
+}
+
+/**
+ * Turns decoded blocks into the same `{ hash: { count, metrics } }` shape as JSON /set,
+ * then reuses parseSetMap for Item vs Set constructor parity.
+ */
+function binaryBlocksToElements(collection, blocks, decodeRules = DEFAULT_SETS_METRIC_DECODE) {
+  return parseSetMap(binaryBlocksToRawMap(blocks, decodeRules), collection);
+}
+
+/**
+ * Batch fetch via GET `/sets` (binary octet-stream). Same path-fill model as
+ * `/set`: the contacted peer is the ingress seed; deep=true fills misses via
+ * inter-node recursion into that peer's LRU. No contact payload — keep using
+ * the seed peer.
+ *
+ * @param {string} protocol
+ * @param {Peer} peer
+ * @param {string} collection
+ * @param {string[]} locations
+ * @param {{ propertyCount?: number, deep?: boolean }} [options]
+ * @returns {Promise<{ contact: Peer, set: ReturnType<typeof binaryBlocksToElements> }>}
+ */
+async function getSets(protocol, peer, collection, locations, options = {}) {
+  const cleaned = Array.isArray(locations)
+    ? locations.map((s) => String(s).trim()).filter(Boolean)
+    : [];
+
+  if (cleaned.length === 0) {
+    return { contact: peer, set: [] };
+  }
+
+  const deep = options.deep !== false;
+  const locationsParam = cleaned.join(",");
+  const url = `${protocol}://${getHostFromIP(
+    peer.ip()
+  )}:${peer.port()}/sets?collection=${encodeURIComponent(
+    collection
+  )}&location=${encodeURIComponent(locationsParam)}&deep=${
+    deep ? "true" : "false"
+  }`;
+
+  const response = await axios$1.get(url, {
+    responseType: "arraybuffer",
+    headers: authHeaders(),
+  });
+
+  const raw = response.data;
+  let u8 = null;
+  if (raw instanceof ArrayBuffer) {
+    u8 = raw.byteLength ? new Uint8Array(raw) : null;
+  } else if (raw instanceof Uint8Array) {
+    u8 = raw.byteLength ? raw : null;
+  } else if (raw?.buffer instanceof ArrayBuffer) {
+    const len = raw.byteLength ?? 0;
+    u8 = len ? new Uint8Array(raw.buffer, raw.byteOffset ?? 0, len) : null;
+  }
+
+  if (!u8 || u8.byteLength === 0) {
+    return { contact: peer, set: [] };
+  }
+
+  const propertyCount =
+    Number(options.propertyCount) > 0
+      ? Math.floor(Number(options.propertyCount))
+      : SETS_BINARY_PROPERTY_COUNT;
+
+  const { blocks } = decodeSetsBinary(u8, { propertyCount });
+  const set = binaryBlocksToElements(collection, blocks);
+
+  return {
+    contact: peer,
+    set,
+  };
+}
+
+/**
+ * GET /sets — binary stream (application/octet-stream). Multiple locations comma-separated.
+ *
+ * @param {string} protocol
+ * @param {Peer} peer
+ * @param {string} collection
+ * @param {string[]} locations
+ * @returns {Promise<Uint8Array>}
+ */
+async function getSetsBinary(protocol, peer, collection, locations) {
+  const cleaned = Array.isArray(locations)
+    ? locations.map((s) => String(s).trim()).filter(Boolean)
+    : [];
+  if (cleaned.length === 0) {
+    return new Uint8Array(0);
+  }
+  const locParam = cleaned.join(",");
+  const url = `${protocol}://${getHostFromIP(
+    peer.ip()
+  )}:${peer.port()}/sets?collection=${encodeURIComponent(
+    collection
+  )}&location=${encodeURIComponent(locParam)}`;
+
+  const response = await axios$1.get(url, {
+    responseType: "arraybuffer",
+    headers: authHeaders(),
+  });
+
+  const raw = response.data;
+  return raw instanceof Uint8Array ? raw : new Uint8Array(raw);
 }
 
 /**
@@ -9498,8 +9974,13 @@ class API extends API$1 {
 }
 
 API.prototype.pingPeer = pingPeer;
+API.prototype.getNeighbors = getNeighbors;
 API.prototype.addItem = addItem;
 API.prototype.deleteItem = deleteItem;
 API.prototype.getSet = getSet;
+API.prototype.getSets = getSets;
+/** Alias used by some call sites / docs for batch `/sets`. */
+API.prototype.getMultipleSets = getSets;
+API.prototype.getSetsBinary = getSetsBinary;
 
-export { API, Collection, Cube, Grid, Item$1 as Item, Linear, Local, Network, Peer, Set$1 as Set, Space, Spherical, decodeUrl64, encodeUrl64, parent$1 as parent };
+export { API, Collection, Cube, Grid, Item$1 as Item, Linear, Local, Network, Peer, Set$1 as Set, Space, Spherical, decodeUrl64, encodeUrl64, parent$1 as parent, transform };
