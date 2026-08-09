@@ -30,7 +30,6 @@ export async function addItem(
       id: reference,
     },
     root: root,
-    current: location,
   };
 
   try {

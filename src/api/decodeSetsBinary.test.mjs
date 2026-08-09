@@ -1,144 +1,83 @@
 /**
- * Unit tests for decodeSetsBinary / decodePackedInts (no live HTTP).
+ * The `/sets` binary is a lossy projection: the server strips `:reference` and
+ * truncates every key to its precision, so a payload can name the same cell
+ * several times. Decoding has to add those rows up — the counts it produces are
+ * the Aggregate view's numbers.
  */
 
+import test from "node:test";
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
 
-import {
-  decodePackedInts,
-  decodeSetsBinary,
-  binaryBlocksToRawMap,
-  SETS_BINARY_PROPERTY_COUNT,
-} from "./decodeSetsBinary.js";
+import { binaryBlocksToRawMap, binaryBlocksToElements } from "./decodeSetsBinary.js";
 
-/** Mirrors go-indexus-core/domain/collection.go encodeBits (MSB-first stream). */
-function encodeBitsJs(values, bitsPerValue) {
-  if (bitsPerValue <= 0) return new Uint8Array(0);
-  let buffer = 0n;
-  let bufferBits = 0n;
-  const result = [];
-
-  function flushFullBytes() {
-    while (bufferBits >= 8n) {
-      const shift = bufferBits - 8n;
-      const byteValue = Number((buffer >> shift) & 0xffn);
-      result.push(byteValue);
-      bufferBits -= 8n;
-      buffer &= (1n << bufferBits) - 1n;
-    }
-  }
-
-  for (let vi = 0; vi < values.length; vi++) {
-    buffer = (buffer << BigInt(bitsPerValue)) | BigInt(values[vi]);
-    bufferBits += BigInt(bitsPerValue);
-    flushFullBytes();
-  }
-
-  while (bufferBits > 0n) {
-    if (bufferBits >= 8n) {
-      const shift = bufferBits - 8n;
-      const byteValue = Number((buffer >> shift) & 0xffn);
-      result.push(byteValue);
-      bufferBits -= 8n;
-      buffer &= (1n << bufferBits) - 1n;
-    } else {
-      const byteValue = Number((buffer << (8n - bufferBits)) & 0xffn);
-      result.push(byteValue);
-      bufferBits = 0n;
-    }
-  }
-
-  return Uint8Array.from(result);
+/**
+ * One decoded depth bucket. `counts` is property column 0; the three metric
+ * columns follow in the order http/p2p declares them.
+ */
+function block(depthIndex, keys, counts, metrics = null) {
+  const size = keys.length;
+  const zeros = new Array(size).fill(0);
+  return {
+    depthIndex,
+    size,
+    keys,
+    columns: [counts, metrics?.[0] ?? zeros, metrics?.[1] ?? zeros, metrics?.[2] ?? zeros],
+    bitCounts: [8, 8, 8, 8],
+  };
 }
 
-describe("decodePackedInts", () => {
-  it("returns zeros when bitsPerValue is 0", () => {
-    const u8 = new Uint8Array([0xff, 0xff]);
-    const { values, bytesConsumed } = decodePackedInts(u8, 0, 5, 0);
-    assert.deepEqual(values, [0, 0, 0, 0, 0]);
-    assert.equal(bytesConsumed, 0);
-  });
+test("rows sharing a truncated key are summed, not overwritten", () => {
+  const stats = { folded: 0 };
+  const raw = binaryBlocksToRawMap(
+    [block(5, ["7xSEvI", "7xSEvg", "7xSEvI"], [1, 1, 1])],
+    undefined,
+    stats
+  );
 
-  it("round-trips Go-style encodeBits for varied widths", () => {
-    const cases = [
-      { values: [7, 7, 7], bits: 3 },
-      { values: [10, 20, 30], bits: 8 },
-      { values: [1000, 2000], bits: 12 },
-      { values: [59694211, 2452286115007], bits: 42 },
-    ];
-    for (const c of cases) {
-      const encoded = encodeBitsJs(c.values, c.bits);
-      const { values, bytesConsumed } = decodePackedInts(
-        encoded,
-        0,
-        c.values.length,
-        c.bits
-      );
-      assert.equal(bytesConsumed, encoded.length);
-      for (let i = 0; i < c.values.length; i++) {
-        assert.equal(
-          values[i],
-          c.values[i],
-          `idx ${i} bits=${c.bits} encodedLen=${encoded.length}`
-        );
-      }
-    }
-  });
+  assert.equal(Object.keys(raw).length, 2);
+  assert.equal(raw["7xSEvI"].count, 2, "both items in the cell are counted");
+  assert.equal(raw["7xSEvg"].count, 1);
+  assert.equal(stats.folded, 1, "the fold is reported so it can be logged");
 });
 
-describe("decodeSetsBinary", () => {
-  it("decodes a minimal synthetic block", () => {
-    const depthIndex = 1;
-    const size = 2;
-    const keyLen = depthIndex + 1;
-    const keysAscii = ["ab", "cd"];
-    const propertyCount = SETS_BINARY_PROPERTY_COUNT;
-    const bitCounts = [8, 8, 10, 12];
-    const col0 = encodeBitsJs([5, 9], bitCounts[0]);
-    const col1 = encodeBitsJs([42, 99], bitCounts[1]);
-    const col2 = encodeBitsJs([1000, 2000], bitCounts[2]);
-    const col3 = encodeBitsJs([3000, 4000], bitCounts[3]);
+test("no key repeats, nothing folds", () => {
+  const stats = { folded: 0 };
+  const raw = binaryBlocksToRawMap([block(0, ["1", "7", "e"], [10, 20, 30])], undefined, stats);
 
-    const header = [];
-    header.push(depthIndex);
-    header.push(0, 0, 0, size);
-    for (let j = 0; j < propertyCount; j++) {
-      header.push(bitCounts[j]);
-    }
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, v.count])),
+    { 1: 10, 7: 20, e: 30 }
+  );
+  assert.equal(stats.folded, 0);
+});
 
-    const keyBytes = new Uint8Array(size * keyLen);
-    for (let i = 0; i < size; i++) {
-      const enc = new TextEncoder().encode(keysAscii[i]);
-      keyBytes.set(enc, i * keyLen);
-    }
+test("a folded cell keeps the whole mass of its metrics", () => {
+  // Columns are [count, €/m² (÷1), lat (÷1e6), lng (÷1e6)].
+  const raw = binaryBlocksToRawMap([
+    block(5, ["7xSEvI", "7xSEvI"], [1, 1], [[3000, 5000], [0, 0], [0, 0]]),
+  ]);
 
-    const totalLen =
-      header.length + keyBytes.length + col0.length + col1.length + col2.length + col3.length;
-    const buf = new Uint8Array(totalLen);
-    let o = 0;
-    buf.set(header, o);
-    o += header.length;
-    buf.set(keyBytes, o);
-    o += keyBytes.length;
-    buf.set(col0, o);
-    o += col0.length;
-    buf.set(col1, o);
-    o += col1.length;
-    buf.set(col2, o);
-    o += col2.length;
-    buf.set(col3, o);
+  assert.equal(raw["7xSEvI"].count, 2);
+  assert.equal(raw["7xSEvI"].metrics[2], 8000, "the metric column is summed too");
+});
 
-    const { blocks } = decodeSetsBinary(buf.buffer);
-    assert.equal(blocks.length, 1);
-    assert.equal(blocks[0].depthIndex, depthIndex);
-    assert.equal(blocks[0].size, size);
-    assert.deepEqual(blocks[0].keys, keysAscii);
+test("the payload total survives decoding", () => {
+  const keys = ["aaaaaa", "aaaaab", "aaaaaa", "aaaaac", "aaaaab", "aaaaaa"];
+  const counts = [1, 4, 2, 1, 3, 5];
+  const raw = binaryBlocksToRawMap([block(5, keys, counts)]);
 
-    const raw = binaryBlocksToRawMap(blocks);
-    assert.equal(raw.ab.count, 5);
-    assert.equal(raw.cd.count, 9);
-    assert.ok(Array.isArray(raw.ab.metrics));
-    assert.ok(Array.isArray(raw.cd.metrics));
-  });
+  const decoded = Object.values(raw).reduce((a, v) => a + v.count, 0);
+  assert.equal(decoded, counts.reduce((a, b) => a + b, 0));
+});
+
+test("a cell holding several items reads as a zone, not as one of them", () => {
+  // parseSetMap keys off count: 1 is a single item, more than 1 is a set. Two
+  // items folded into one cell must therefore stop presenting as a lone item.
+  const elements = binaryBlocksToElements("demo", [
+    block(5, ["7xSEvI", "7xSEvI", "7xSEvg"], [1, 1, 1]),
+  ]);
+
+  const byHash = Object.fromEntries(elements.map((e) => [e.hash(), e]));
+  assert.equal(byHash["7xSEvI"].count(), 2);
+  assert.equal(byHash["7xSEvg"].count(), 1);
 });

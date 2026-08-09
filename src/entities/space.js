@@ -1,4 +1,4 @@
-import { ROOT, BASEURL64, decodeUrl64 } from "../utilities/encoding.js";
+import { ROOT, BASEURL64 } from "../utilities/encoding.js";
 
 class Space {
   constructor(dimensions, mask, offset) {

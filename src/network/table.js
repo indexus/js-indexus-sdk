@@ -47,6 +47,18 @@ class Table {
     }
     return this._bst.remove(0, id);
   }
+
+  /**
+   * @returns {Peer[]} peers currently in the routing table
+   */
+  peers() {
+    const out = [];
+    const buf = new Uint8Array(64);
+    this._bst.traverse(0, buf, (_idx, _id, peer) => {
+      if (peer instanceof Peer) out.push(peer);
+    });
+    return out;
+  }
 }
 
 export { Table };

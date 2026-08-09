@@ -1,7 +1,6 @@
 import { Layer } from "./layer.js";
-import { Monitoring, State, Mask, Offset, Network } from "../model/index.js";
+import { Monitoring, State } from "../model/index.js";
 
-import { Space } from "../entities/space.js";
 import { Set } from "../entities/set.js";
 
 import { run, prepare, query, stream } from "./exploration.js";

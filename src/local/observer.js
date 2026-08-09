@@ -1,4 +1,3 @@
-import { ROOT } from "../utilities/encoding.js";
 import { Item, Monitoring, State } from "../model/index.js";
 
 export async function getSet(set, addSet) {

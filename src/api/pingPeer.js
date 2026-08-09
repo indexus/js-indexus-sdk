@@ -1,6 +1,5 @@
 import axios from "axios";
 
-import { Space } from "../entities/space.js";
 import { Peer } from "../network/peer.js";
 import { getHostFromIP } from "../utilities/network.js";
 import { authHeaders } from "./authHeaders.js";
@@ -33,14 +32,11 @@ export async function pingPeer(protocol, ip, port) {
 
     // Create a Peer instance from the contact data
     const contactData = data.contact;
-    // Missing client_ready (old binary) ⇒ assume ready; explicit false ⇒ joining.
-    const clientReady = data?.client_ready !== false;
     const contactPeer = new Peer(
       contactData.name,
       contactData.ips,
       contactData.port,
-      ip,
-      clientReady
+      ip
     );
     return contactPeer;
   } catch (error) {

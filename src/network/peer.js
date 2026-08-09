@@ -8,9 +8,8 @@ class Peer extends BasePeer {
    * @param {Object.<string, null>} ips - An object containing the peer's IP addresses.
    * @param {number} port - The port number the peer is listening on.
    * @param {string} ip - The primary IP address of the peer.
-   * @param {boolean} [clientReady=true] - Whether clients may XOR-route writes here.
    */
-  constructor(hash, ips, port, ip, clientReady = true) {
+  constructor(hash, ips, port, ip) {
     super();
 
     this._id = decodeUrl64(hash);
@@ -18,7 +17,6 @@ class Peer extends BasePeer {
     this._ips = ips;
     this._port = port;
     this._ip = ip;
-    this._clientReady = clientReady !== false;
   }
 
   /**
@@ -59,20 +57,6 @@ class Peer extends BasePeer {
    */
   ip() {
     return this._ip;
-  }
-
-  /**
-   * Whether this peer is safe for client XOR write routing.
-   * Joining (spawned) nodes advertise false until ownership is mirrored.
-   * @returns {boolean}
-   */
-  clientReady() {
-    return this._clientReady !== false;
-  }
-
-  /** @param {boolean} ready */
-  setClientReady(ready) {
-    this._clientReady = !!ready;
   }
 }
 
