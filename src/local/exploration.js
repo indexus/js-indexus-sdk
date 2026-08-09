@@ -1,5 +1,6 @@
 import { State, Monitoring, Item } from "../model/index.js";
 import { asyncPool } from "../utilities/network.js";
+import { ingestChildren } from "./observer.js";
 
 export async function run() {
   if (this.prepare()) {
@@ -78,6 +79,13 @@ export function prepare() {
   return predicted >= this.limit || layer.radius === this.first().radius;
 }
 
+/**
+ * Fetch children for every selected parent.
+ *
+ * When Network method is `getSets`, warm all parents of a collection in one
+ * multi-location wave (same spirit as Grid.prefetchBatchSets), then ingest
+ * from the returned map. `getSet` mode keeps per-parent asyncPool.
+ */
 export async function query() {
   const selectedList = this.current().selected.list;
   // Always allocate the next layer up-front. Empty getSet responses (missing
@@ -85,27 +93,95 @@ export async function query() {
   // then level++ into an undefined layer.
   this.next();
 
-  // Define the iterator function for each element
-  const process = async (element) => {
+  const method = this.network?.readOptions?.()?.method ?? "getSets";
+  const useBatch =
+    method === "getSets" && typeof this.network?.getSets === "function";
+
+  if (useBatch) {
+    await queryBatchSets.call(this, selectedList);
+  } else {
+    const process = async (element) => {
+      try {
+        await this.getSet(element, (set) => {
+          this.next().indexed.add(set);
+        });
+        this.monitoring.send(new Monitoring(this.level, State.Loaded, element));
+      } catch (error) {
+        console.error(
+          `Failed to retrieve set for ${element.collection()}:`,
+          error
+        );
+      }
+    };
+    await asyncPool(this.network.getConcurrency(), selectedList, process);
+  }
+
+  this.current().loaded.concat(this.current().selected.list);
+  this.current().selected.clear();
+}
+
+/**
+ * @param {Array<import("../entities/set.js").Set | import("../entities/item.js").Item>} selectedList
+ */
+async function queryBatchSets(selectedList) {
+  /** @type {Array<import("../entities/item.js").Item>} */
+  const items = [];
+  /** @type {Map<string, Array<import("../entities/set.js").Set>>} */
+  const parentsByColl = new Map();
+
+  for (const element of selectedList) {
+    if (element instanceof Item) {
+      items.push(element);
+      continue;
+    }
+    const collection = element.collection();
+    if (!parentsByColl.has(collection)) {
+      parentsByColl.set(collection, []);
+    }
+    parentsByColl.get(collection).push(element);
+  }
+
+  for (const item of items) {
     try {
-      await this.getSet(element, (set) => {
+      await this.getSet(item, (set) => {
         this.next().indexed.add(set);
       });
-
-      this.monitoring.send(new Monitoring(this.level, State.Loaded, element));
+      this.monitoring.send(new Monitoring(this.level, State.Loaded, item));
     } catch (error) {
       console.error(
-        `Failed to retrieve set for ${element.collection()}:`,
+        `Failed to retrieve set for ${item.collection()}:`,
         error
       );
     }
-  };
+  }
 
-  await asyncPool(this.network.getConcurrency(), selectedList, process);
+  for (const [collection, parents] of parentsByColl) {
+    const hashes = parents.map((p) => p.hash());
+    let map;
+    try {
+      map = await this.network.getSets(collection, hashes);
+    } catch (error) {
+      console.error(`Failed to retrieve sets for ${collection}:`, error);
+      continue;
+    }
 
-  // After all promises are resolved
-  this.current().loaded.concat(this.current().selected.list);
-  this.current().selected.clear();
+    for (const parent of parents) {
+      try {
+        const elements = map.get(parent.hash()) || [];
+        ingestChildren.call(this, parent, elements, (set) => {
+          this.next().indexed.add(set);
+        });
+        this.monitoring.send(
+          new Monitoring(this.level, State.Loaded, parent)
+        );
+      } catch (error) {
+        console.error(
+          `Failed to ingest set for ${parent.collection()}:`,
+          error
+        );
+      }
+    }
+  }
 }
 
 export function stream() {

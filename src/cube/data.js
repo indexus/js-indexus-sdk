@@ -1,6 +1,6 @@
 import {
   abelianCount,
-  abelianEqual,
+  abelianCountEqual,
   abelianMetrics,
   abelianSubtract,
   abelianSum,
@@ -122,10 +122,16 @@ export function set(elements) {
     if (!existing || !hasSubtree) {
       if (trace) trace.fresh++;
       this.add(element);
-    } else if (!abelianEqual(existing, element)) {
+    } else if (!abelianCountEqual(existing, element)) {
       // Remote Abelian drifted during inserts: patch mass + adopt remote
       // children links when the payload carries them (reconcile drill).
       // Otherwise keep the live drilled children[]. Ancestor rollup via delta.
+      //
+      // Drift is the count, never the metrics: this cell folded its mass in
+      // the order it was drilled and the node folded it in another, so the
+      // sums differ in the low bits on essentially every cell that already
+      // has a subtree. Comparing them patched every such cell on every
+      // delivery and rolled a float epsilon up to the root each time.
       const previousCount = abelianCount(existing);
       const previousMetrics = abelianMetrics(existing);
       const count = abelianCount(element);
@@ -157,7 +163,7 @@ export function set(elements) {
         abelianSubtract(metrics.slice(), previousMetrics)
       );
     } else if (trace) {
-      // Abelian equal + existing subtree → keep local tree (no churn)
+      // Same count + existing subtree → keep local tree (no churn)
       trace.unchanged++;
     }
 

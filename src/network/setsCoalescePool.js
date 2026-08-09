@@ -28,11 +28,11 @@ export class SetsCoalescePool {
    */
   constructor(options = {}) {
     const maxChunk =
-      Number(options.maxChunkSize) > 0 ? Math.floor(options.maxChunkSize) : 96;
+      Number(options.maxChunkSize) > 0 ? Math.floor(options.maxChunkSize) : 128;
     const maxParallel =
       Number(options.maxParallelChunks) > 0
         ? Math.floor(options.maxParallelChunks)
-        : 16;
+        : 64;
 
     // Chunk size 1 is intentional for method=getSet (one-location batches).
     this.maxChunkSize = Math.max(1, maxChunk);

@@ -1,8 +1,8 @@
 import axios from "axios";
 
 import { Peer } from "../network/peer.js";
-import { getHostFromIP } from "../utilities/network.js";
 import { authHeaders } from "./authHeaders.js";
+import { peerUrl } from "./peerUrl.js";
 
 /**
  * Adds an item to a collection.
@@ -13,6 +13,7 @@ import { authHeaders } from "./authHeaders.js";
  * @param {string} root - The targeted root set.
  * @param {string} location - The location of the item.
  * @param {string} id - The ID of the item.
+ * @param {{ gateway?: string }} [options]
  * @returns {Promise<Object>} - The response from the server.
  */
 export async function addItem(
@@ -22,7 +23,8 @@ export async function addItem(
   root,
   location,
   metrics,
-  reference
+  reference,
+  options = {}
 ) {
   // Construct the POST request body
   const requestBody = {
@@ -39,7 +41,7 @@ export async function addItem(
   try {
     // Make the POST request to add the item to the collection
     await axios.post(
-      `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
+      peerUrl(protocol, peer.ip(), peer.port(), "/item", options.gateway),
       requestBody,
       {
         headers: authHeaders({

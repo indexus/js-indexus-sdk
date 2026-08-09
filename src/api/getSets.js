@@ -1,6 +1,5 @@
 import axios from "axios";
 
-import { getHostFromIP } from "../utilities/network.js";
 import {
   decodeSetsBinary,
   binaryBlocksToElements,
@@ -10,6 +9,7 @@ import { decodeSetsEnvelope } from "./decodeSetsEnvelope.js";
 import { authHeaders } from "./authHeaders.js";
 import { encodeUrl64 } from "../utilities/encoding.js";
 import { debugEnabled, debugLog } from "../utilities/debug.js";
+import { peerUrl } from "./peerUrl.js";
 
 /**
  * @param {Record<string, string>} headers
@@ -38,12 +38,14 @@ function ingressFromHeaders(headers) {
  *   envelope?: boolean,
  *   via?: string | string[],
  *   routingKey?: Uint8Array,
+ *   gateway?: string,
  * }} [options]
  * @returns {Promise<{
  *   elements: any[],
  *   redirects: Array<{ location: string, name: string, ip: string, port: number }>,
  *   ingress?: { name: string, ip: string, port: number } | null,
  *   bytes?: number,
+ *   wireBytes?: number,
  *   rows?: number,
  *   folded?: number,
  * }>}
@@ -61,9 +63,7 @@ export async function getSets(protocol, peer, collection, locations, options = {
   const refresh = options.refresh === true;
   const envelope = options.envelope === true || (!deep && options.envelope !== false);
   const locationsParam = cleaned.join(",");
-  let url = `${protocol}://${getHostFromIP(
-    peer.ip()
-  )}:${peer.port()}/sets?collection=${encodeURIComponent(
+  let url = `${peerUrl(protocol, peer.ip(), peer.port(), "/sets", options.gateway)}?collection=${encodeURIComponent(
     collection
   )}&location=${encodeURIComponent(locationsParam)}&deep=${
     deep ? "true" : "false"
@@ -89,6 +89,10 @@ export async function getSets(protocol, peer, collection, locations, options = {
   });
 
   const ingress = ingressFromHeaders(response.headers);
+  // Present only when the node sent an unchunked body: with `Content-Encoding:
+  // gzip` it is the compressed size, so it tells what the link actually carried
+  // while `bytes` below stays the decoded frame the browser handed us.
+  const wireBytes = Number(response.headers?.["content-length"]);
 
   const raw = response.data;
   let u8 = null;
@@ -109,7 +113,15 @@ export async function getSets(protocol, peer, collection, locations, options = {
       refresh,
       envelope,
     });
-    return { elements: [], redirects: [], ingress, bytes: 0, rows: 0, folded: 0 };
+    return {
+      elements: [],
+      redirects: [],
+      ingress,
+      bytes: 0,
+      wireBytes: 0,
+      rows: 0,
+      folded: 0,
+    };
   }
 
   let redirects = [];
@@ -121,7 +133,15 @@ export async function getSets(protocol, peer, collection, locations, options = {
   }
 
   if (!body || body.byteLength === 0) {
-    return { elements: [], redirects, ingress, bytes: u8.byteLength, rows: 0, folded: 0 };
+    return {
+      elements: [],
+      redirects,
+      ingress,
+      bytes: u8.byteLength,
+      wireBytes,
+      rows: 0,
+      folded: 0,
+    };
   }
 
   const propertyCount =
@@ -156,6 +176,7 @@ export async function getSets(protocol, peer, collection, locations, options = {
     redirects,
     ingress,
     bytes: u8.byteLength,
+    wireBytes,
     rows,
     folded: stats.folded,
   };
