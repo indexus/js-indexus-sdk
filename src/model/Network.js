@@ -16,25 +16,23 @@ class Network {
   static async addItem(collection, root, location, metrics, reference) {}
 
   /**
-   * Deletes an item from a collection at a specific location in the network.
-   * If the operation fails, it retries with a different peer.
-   * @param {string} collection - The name of the collection.
-   * @param {string} root - The targeted root set.
-   * @param {string} location - The location identifier within the collection.
-   * @param {string} reference - The unique identifier of the item to delete.
-   * @returns {Promise<void>}
-   */
-  static async deleteItem(collection, root, location, reference) {}
-
-  /**
    * Retrieves a set of items from a collection at a specific location in the network.
-   * The method selects the appropriate peer(s) to handle the request.
+   * Convenience alias over getSets([location]); both share one `/sets` engine.
    * @param {string} collection - The name of the collection.
    * @param {string} location - The location identifier within the collection.
-   * @param {boolean} deep - Path-fill on/off (recurse to owner + fill LRU).
+   * @param {{ navigation?: "ingress"|"direct", method?: "getSet"|"getSets", refresh?: boolean }} [options]
    * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
    */
-  static async getSet(collection, location, deep) {}
+  static async getSet(collection, location, options) {}
+
+  /**
+   * Batch `/sets` read. navigation=ingress|direct, method=getSet|getSets.
+   * @param {string} collection
+   * @param {string[]} locations
+   * @param {{ navigation?: "ingress"|"direct", method?: "getSet"|"getSets", refresh?: boolean }} [options]
+   * @returns {Promise<Map<string, Element[]>>}
+   */
+  static async getSets(collection, locations, options) {}
 }
 
 export { Network };

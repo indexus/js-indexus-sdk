@@ -11,7 +11,7 @@
   ],
   "scripts": {
     "build": "rollup -c",
-    "test": "echo \"No tests specified\" && exit 0",
+    "test": "node --test src/api/*.test.mjs src/network/*.test.mjs src/grid/*.test.mjs src/utilities/*.test.mjs src/entities/*.test.mjs src/cube/*.test.mjs",
     "add": "babel-node examples/add.js",
     "local": "babel-node examples/local.js",
     "grid": "babel-node examples/grid.js"
@@ -39,6 +39,5 @@
   ],
   "author": "Rémi Henriot",
   "license": "MIT",
-  "dependencies": {
-  }
+  "dependencies": {}
 }

@@ -31,7 +31,6 @@ export async function deleteItem(
       id: reference,
     },
     root: root,
-    current: location,
   };
   const headers = authHeaders({
     "Content-Type": "application/json",

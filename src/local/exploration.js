@@ -1,5 +1,4 @@
-import { State, Monitoring, Item, Set } from "../model/index.js";
-import { transform } from "../utilities/encoding.js";
+import { State, Monitoring, Item } from "../model/index.js";
 import { asyncPool } from "../utilities/network.js";
 
 export async function run() {
@@ -88,16 +87,17 @@ export async function query() {
 
   // Define the iterator function for each element
   const process = async (element) => {
-    const s = element;
     try {
-      const id = transform(s.collection(), s.hash());
-      await this.getSet(s, (set) => {
+      await this.getSet(element, (set) => {
         this.next().indexed.add(set);
       });
 
-      this.monitoring.send(new Monitoring(this.level, State.Loaded, s));
+      this.monitoring.send(new Monitoring(this.level, State.Loaded, element));
     } catch (error) {
-      console.error(`Failed to retrieve set for ${s.collection()}:`, error);
+      console.error(
+        `Failed to retrieve set for ${element.collection()}:`,
+        error
+      );
     }
   };
 

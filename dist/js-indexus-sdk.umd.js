@@ -778,27 +778,28 @@
     async addItem(protocol, peer, collection, location, metrics, reference) {}
 
     /**
-     * Deletes an item from a collection at a specific location on a peer.
-     * @param {string} protocol - Protocol to use to contact the peer http/https.
-     * @param {Peer} peer - The peer holding the ingress for the deletion.
-     * @param {string} collection - The name of the collection.
-     * @param {string} root - The targeted root set.
-     * @param {string} location - The location identifier within the collection.
-     * @param {string} reference - The unique identifier of the item to delete.
-     * @returns {Promise<any>} - A promise that resolves when the deletion is accepted.
-     */
-    async deleteItem(protocol, peer, collection, root, location, reference) {}
-
-    /**
-     * Retrieves a set of items from a collection at a specific location on a peer.
-     * @param {string} protocol - Protocol to use to contact the peer http/https.
-     * @param {Peer} peer - The peer from which to retrieve the set.
-     * @param {string} collection - The name of the collection.
-     * @param {string} location - The location identifier within the collection.
-     * @param {boolean} deep - Path-fill on/off (recurse to owner + fill LRU).
-     * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
+     * Compatibility alias over getSets([location]).
+     * @param {string} protocol
+     * @param {Peer} peer
+     * @param {string} collection
+     * @param {string} location
+     * @param {boolean} [deep]
+     * @returns {Promise<{ contact: Peer, set: Element[] | null }>}
      */
     async getSet(protocol, peer, collection, location, deep) {}
+
+    /**
+     * Batch GET `/sets` (binary). Opt-in `envelope` carries IXS1 owner redirects.
+     * When `options.routingKey` is set the peer may answer with a closer read
+     * ingress, returned as `ingress`.
+     * @param {string} protocol
+     * @param {Peer} peer
+     * @param {string} collection
+     * @param {string[]} locations
+     * @param {{ propertyCount?: number, deep?: boolean, refresh?: boolean, envelope?: boolean, via?: string|string[], routingKey?: Uint8Array }} [options]
+     * @returns {Promise<{ elements: Array, redirects: Array, ingress?: { name: string, ip: string, port: number } | null }>}
+     */
+    async getSets(protocol, peer, collection, locations, options) {}
   }
 
   /**
@@ -818,25 +819,23 @@
     static async addItem(collection, root, location, metrics, reference) {}
 
     /**
-     * Deletes an item from a collection at a specific location in the network.
-     * If the operation fails, it retries with a different peer.
-     * @param {string} collection - The name of the collection.
-     * @param {string} root - The targeted root set.
-     * @param {string} location - The location identifier within the collection.
-     * @param {string} reference - The unique identifier of the item to delete.
-     * @returns {Promise<void>}
-     */
-    static async deleteItem(collection, root, location, reference) {}
-
-    /**
      * Retrieves a set of items from a collection at a specific location in the network.
-     * The method selects the appropriate peer(s) to handle the request.
+     * Convenience alias over getSets([location]); both share one `/sets` engine.
      * @param {string} collection - The name of the collection.
      * @param {string} location - The location identifier within the collection.
-     * @param {boolean} deep - Path-fill on/off (recurse to owner + fill LRU).
+     * @param {{ navigation?: "ingress"|"direct", method?: "getSet"|"getSets", refresh?: boolean }} [options]
      * @returns {Promise<Element[]>} - A promise that resolves with the retrieved set of items.
      */
-    static async getSet(collection, location, deep) {}
+    static async getSet(collection, location, options) {}
+
+    /**
+     * Batch `/sets` read. navigation=ingress|direct, method=getSet|getSets.
+     * @param {string} collection
+     * @param {string[]} locations
+     * @param {{ navigation?: "ingress"|"direct", method?: "getSet"|"getSets", refresh?: boolean }} [options]
+     * @returns {Promise<Map<string, Element[]>>}
+     */
+    static async getSets(collection, locations, options) {}
   }
 
   class Item$1 extends Item$2 {
@@ -1584,8 +1583,12 @@
     if (typeof input === "string") {
       // Convert string to Uint8Array
       bytes = Buffer.from(input, "utf-8");
-    } else if (input instanceof Uint8Array || Buffer.isBuffer(input)) {
+    } else if (Buffer.isBuffer(input)) {
       bytes = input;
+    } else if (input instanceof Uint8Array) {
+      // Uint8Array.toString() ignores the encoding argument — wrap the same
+      // memory in a Buffer instead of copying.
+      bytes = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
     } else {
       throw new Error("Input must be a string or Uint8Array");
     }
@@ -1651,31 +1654,43 @@
     return details;
   }
 
-  function parent$1(hash) {
-    if (hash === ROOT) {
+  function parent$1(location) {
+    if (location === ROOT) {
       return "";
     }
-    const l = hash.length - 1;
+    const l = location.length - 1;
     if (l === 0) {
       return ROOT;
     } else {
-      return hash.substring(0, l);
+      return location.substring(0, l);
     }
   }
 
-  function transform(universe, location) {
-    let key = universe;
-    if (location !== ROOT) {
-      key = location + key.substring(location.length);
+  // domain.IsDirectChild: one encoding step below `location`. Rejects self-keys
+  // and anything deeper, which is what keeps a traversal from looping. Every
+  // character of the alphabet is an ordinary location — `-` and `_` included —
+  // so nothing here may treat one of them as a marker (guarantee P4).
+  function isDirectChild(location, child) {
+    if (!child || child === location) {
+      return false;
     }
+    return parent$1(child) === location;
+  }
 
-    let id;
-    try {
-      id = decodeUrl64(key);
-    } catch (err) {
-      throw new Error(err);
+  // domain.Key: a zone is a (collection, location) pair. Used wherever a zone
+  // indexes a local map — the Network read cache, the Grid children cache.
+  function zoneKey(collection, location) {
+    return `${collection}/${location}`;
+  }
+
+  // zoneKeyID: maps (collection, location) into the routing space. Note the
+  // inversion — the location leads, so sibling zones of one collection stay
+  // adjacent under XOR and a node owns a contiguous slice of the tree.
+  function zoneKeyID(collection, location) {
+    if (location === ROOT) {
+      return decodeUrl64(collection);
     }
-    return id;
+    return decodeUrl64(location + collection.substring(location.length));
   }
 
   const DIMENSIONS = {
@@ -2094,19 +2109,28 @@
   }
 
   async function asyncPool(poolLimit, array, iteratorFn) {
-    const ret = []; // Array to hold all the promises
-    const executing = []; // Array to hold the currently executing promises
+    if (!Array.isArray(array) || array.length === 0) return [];
 
-    for (const item of array) {
-      const p = Promise.resolve().then(() => iteratorFn(item));
+    const limit = Math.max(1, Math.floor(Number(poolLimit) || 1));
+    if (limit >= array.length) {
+      return Promise.all(array.map((item) => iteratorFn(item)));
+    }
+
+    const ret = [];
+    const executing = [];
+
+    for (let i = 0; i < array.length; i++) {
+      const p = Promise.resolve(iteratorFn(array[i]));
       ret.push(p);
 
-      if (poolLimit <= array.length) {
-        const e = p.then(() => executing.splice(executing.indexOf(e), 1));
-        executing.push(e);
-        if (executing.length >= poolLimit) {
-          await Promise.race(executing);
-        }
+      const e = p.then(() => {
+        const index = executing.indexOf(e);
+        if (index >= 0) executing.splice(index, 1);
+      });
+      executing.push(e);
+
+      if (executing.length >= limit) {
+        await Promise.race(executing);
       }
     }
 
@@ -2209,16 +2233,17 @@
 
     // Define the iterator function for each element
     const process = async (element) => {
-      const s = element;
       try {
-        const id = transform(s.collection(), s.hash());
-        await this.getSet(s, (set) => {
+        await this.getSet(element, (set) => {
           this.next().indexed.add(set);
         });
 
-        this.monitoring.send(new Monitoring(this.level, State.Loaded, s));
+        this.monitoring.send(new Monitoring(this.level, State.Loaded, element));
       } catch (error) {
-        console.error(`Failed to retrieve set for ${s.collection()}:`, error);
+        console.error(
+          `Failed to retrieve set for ${element.collection()}:`,
+          error
+        );
       }
     };
 
@@ -2384,7 +2409,559 @@
   Local.prototype.getSet = getSet$1;
   Local.prototype.addLocation = addLocation;
 
-  function create(xyz, bounds, count, metrics, items, children) {
+  function createStreamCoalescer({ minBatch, flushMs, applyBatch }) {
+    let buffer = [];
+    let timer = null;
+
+    function flush() {
+      timer = null;
+      if (buffer.length === 0) return;
+      const payload = buffer;
+      buffer = [];
+      applyBatch(payload);
+    }
+
+    return {
+      enqueue(elements) {
+        if (!Array.isArray(elements) || elements.length === 0) return;
+
+        for (let i = 0; i < elements.length; i++) {
+          buffer.push(elements[i]);
+        }
+
+        if (buffer.length >= minBatch) {
+          if (timer !== null) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          flush();
+          return;
+        }
+
+        if (timer === null) {
+          timer = setTimeout(flush, flushMs);
+        }
+      },
+
+      flushNow() {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        flush();
+      },
+    };
+  }
+
+  function createArrayPool(maxIdle = 8) {
+    const pool = [];
+    const limit = Number.isFinite(maxIdle) ? Math.max(1, Math.floor(maxIdle)) : 8;
+
+    return {
+      acquire() {
+        return pool.pop() || [];
+      },
+
+      release(array) {
+        if (!Array.isArray(array)) return;
+        array.length = 0;
+        if (pool.length < limit) {
+          pool.push(array);
+        }
+      },
+    };
+  }
+
+  function createSetPool(maxIdle = 8) {
+    const pool = [];
+    const limit = Number.isFinite(maxIdle) ? Math.max(1, Math.floor(maxIdle)) : 8;
+
+    return {
+      acquire() {
+        return pool.pop() || new Set();
+      },
+
+      release(set) {
+        if (!(set instanceof Set)) return;
+        set.clear();
+        if (pool.length < limit) {
+          pool.push(set);
+        }
+      },
+    };
+  }
+
+  const WORKGROUP_SIZE = 64;
+  const PARAMS_BYTE_SIZE = 32;
+
+  const SHADER_CODE = `
+struct Params {
+  viewport: vec4<f32>,
+  count: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> boundsIn: array<vec4<f32>>;
+@group(0) @binding(1) var<uniform> params: Params;
+@group(0) @binding(2) var<storage, read_write> flagsOut: array<u32>;
+
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= params.count) {
+    return;
+  }
+
+  let b = boundsIn[i];
+  let overlap =
+    params.viewport.x <= b.y &&
+    params.viewport.y >= b.x &&
+    params.viewport.z <= b.w &&
+    params.viewport.w >= b.z;
+
+  flagsOut[i] = select(0u, 1u, overlap);
+}
+`;
+
+  function getSphericalSegment(segments) {
+    if (!Array.isArray(segments) || segments.length !== 1) return null;
+    const segment = segments[0];
+    if (!segment) return null;
+    if (
+      !Number.isFinite(segment.south) ||
+      !Number.isFinite(segment.north) ||
+      !Number.isFinite(segment.west) ||
+      !Number.isFinite(segment.east)
+    ) {
+      return null;
+    }
+    return segment;
+  }
+
+  function wrapsDateline(segment) {
+    return segment.west > segment.east;
+  }
+
+  function isWebGpuAvailable() {
+    return (
+      typeof navigator !== "undefined" &&
+      navigator &&
+      typeof navigator.gpu !== "undefined" &&
+      typeof GPUBufferUsage !== "undefined"
+    );
+  }
+
+  function nextPowerOfTwo(value) {
+    let n = Math.max(1, Math.floor(value));
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    return n + 1;
+  }
+
+  class GpuOverlapAccelerator {
+    constructor({ enabled = true, minElements = 1024 } = {}) {
+      this.enabled = enabled;
+      this.minElements = minElements;
+      this.failed = false;
+      this.initPromise = null;
+      this.device = null;
+      this.pipeline = null;
+      this.bindGroupLayout = null;
+      this.bindGroup = null;
+      this.boundsBuffer = null;
+      this.boundsCapacityBytes = 0;
+      this.paramsBuffer = null;
+      this.flagsBuffer = null;
+      this.readBuffer = null;
+      this.flagsCapacity = 0;
+      this.flagsScratch = new Uint32Array(0);
+      this.params = new ArrayBuffer(PARAMS_BYTE_SIZE);
+      this.paramsView = new DataView(this.params);
+    }
+
+    async selectOverlapping(targetBounds, candidates, selected) {
+      if (!this.enabled || this.failed) return false;
+      if (!Array.isArray(candidates) || candidates.length < this.minElements) {
+        return false;
+      }
+
+      const viewport = getSphericalSegment(targetBounds);
+      if (!viewport || wrapsDateline(viewport)) return false;
+
+      const cellCount = candidates.length;
+      const packedBounds = new Float32Array(cellCount * 4);
+      for (let i = 0; i < cellCount; i++) {
+        const candidate = candidates[i];
+        const segment = getSphericalSegment(candidate && candidate._bounds);
+        if (!segment || wrapsDateline(segment)) return false;
+        const offset = i * 4;
+        packedBounds[offset] = segment.south;
+        packedBounds[offset + 1] = segment.north;
+        packedBounds[offset + 2] = segment.west;
+        packedBounds[offset + 3] = segment.east;
+      }
+
+      const contextReady = await this.ensureContext();
+      if (!contextReady) return false;
+
+      try {
+        const flags = await this.runKernel(viewport, packedBounds, cellCount);
+        for (let i = 0; i < cellCount; i++) {
+          if (flags[i] === 1) selected.push(candidates[i]);
+        }
+        return true;
+      } catch (_error) {
+        this.failed = true;
+        return false;
+      }
+    }
+
+    async ensureContext() {
+      if (this.device && this.pipeline && this.bindGroupLayout) return true;
+      if (this.initPromise) return this.initPromise;
+
+      this.initPromise = (async () => {
+        if (!isWebGpuAvailable()) return false;
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) return false;
+        const device = await adapter.requestDevice();
+        const module = device.createShaderModule({ code: SHADER_CODE });
+        const bindGroupLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: "read-only-storage" },
+            },
+            {
+              binding: 1,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: "uniform" },
+            },
+            {
+              binding: 2,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: "storage" },
+            },
+          ],
+        });
+        const pipelineLayout = device.createPipelineLayout({
+          bindGroupLayouts: [bindGroupLayout],
+        });
+        const pipeline = device.createComputePipeline({
+          layout: pipelineLayout,
+          compute: {
+            module,
+            entryPoint: "main",
+          },
+        });
+        const paramsBuffer = device.createBuffer({
+          size: PARAMS_BYTE_SIZE,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        this.device = device;
+        this.pipeline = pipeline;
+        this.bindGroupLayout = bindGroupLayout;
+        this.paramsBuffer = paramsBuffer;
+        return true;
+      })();
+
+      const ready = await this.initPromise;
+      if (!ready) this.initPromise = null;
+      return ready;
+    }
+
+    async runKernel(viewport, packedBounds, count) {
+      const device = this.device;
+      const boundsByteSize = packedBounds.byteLength;
+      this.ensureBuffers(boundsByteSize, count);
+
+      this.paramsView.setFloat32(0, viewport.south, true);
+      this.paramsView.setFloat32(4, viewport.north, true);
+      this.paramsView.setFloat32(8, viewport.west, true);
+      this.paramsView.setFloat32(12, viewport.east, true);
+      this.paramsView.setUint32(16, count, true);
+
+      device.queue.writeBuffer(this.boundsBuffer, 0, packedBounds);
+      device.queue.writeBuffer(this.paramsBuffer, 0, this.params);
+
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.pipeline);
+      pass.setBindGroup(0, this.bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP_SIZE));
+      pass.end();
+      encoder.copyBufferToBuffer(
+        this.flagsBuffer,
+        0,
+        this.readBuffer,
+        0,
+        count * Uint32Array.BYTES_PER_ELEMENT
+      );
+      device.queue.submit([encoder.finish()]);
+
+      await this.readBuffer.mapAsync(GPUMapMode.READ);
+      const mapped = this.readBuffer.getMappedRange(
+        0,
+        count * Uint32Array.BYTES_PER_ELEMENT
+      );
+      if (this.flagsScratch.length < count) {
+        this.flagsScratch = new Uint32Array(nextPowerOfTwo(count));
+      }
+      this.flagsScratch.set(new Uint32Array(mapped), 0);
+      this.readBuffer.unmap();
+
+      return this.flagsScratch.subarray(0, count);
+    }
+
+    ensureBuffers(boundsByteSize, count) {
+      const device = this.device;
+      const requestedBoundsBytes = nextPowerOfTwo(boundsByteSize);
+      const requestedFlags = nextPowerOfTwo(count);
+      const requestedFlagsBytes = requestedFlags * Uint32Array.BYTES_PER_ELEMENT;
+
+      let rebuildBindGroup = false;
+
+      if (!this.boundsBuffer || this.boundsCapacityBytes < requestedBoundsBytes) {
+        if (this.boundsBuffer) this.boundsBuffer.destroy();
+        this.boundsBuffer = device.createBuffer({
+          size: requestedBoundsBytes,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        this.boundsCapacityBytes = requestedBoundsBytes;
+        rebuildBindGroup = true;
+      }
+
+      if (!this.flagsBuffer || this.flagsCapacity < requestedFlags) {
+        if (this.flagsBuffer) this.flagsBuffer.destroy();
+        if (this.readBuffer) this.readBuffer.destroy();
+        this.flagsBuffer = device.createBuffer({
+          size: requestedFlagsBytes,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+        this.readBuffer = device.createBuffer({
+          size: requestedFlagsBytes,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        this.flagsCapacity = requestedFlags;
+        rebuildBindGroup = true;
+      }
+
+      if (!this.bindGroup || rebuildBindGroup) {
+        this.bindGroup = device.createBindGroup({
+          layout: this.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: this.boundsBuffer } },
+            { binding: 1, resource: { buffer: this.paramsBuffer } },
+            { binding: 2, resource: { buffer: this.flagsBuffer } },
+          ],
+        });
+      }
+    }
+  }
+
+  function createGpuOverlapAccelerator(options) {
+    return new GpuOverlapAccelerator(options);
+  }
+
+  /**
+   * The (count, metrics) mass a Set carries — go-indexus-core domain.Abelian.
+   *
+   * Expressed as functions over raw values rather than a class: the Cube keeps
+   * millions of cells as plain objects so they can be packed straight into GPU
+   * buffers, and Sets/Items expose the same mass behind accessors. Every reader
+   * below therefore takes either shape.
+   */
+
+  /**
+   * @param {{ count?: number | (() => number), _count?: number } | null} value
+   * @returns {number}
+   */
+  function abelianCount(value) {
+    if (!value) return 0;
+    if (typeof value.count === "function") return value.count();
+    if (typeof value.count === "number") return value.count;
+    if (typeof value._count === "number") return value._count;
+    return 0;
+  }
+
+  /**
+   * @param {{ metrics?: number[] | (() => number[]), _metrics?: number[] } | null} value
+   * @returns {number[]}
+   */
+  function abelianMetrics(value) {
+    if (!value) return [];
+    if (typeof value.metrics === "function") {
+      const own = value.metrics();
+      return Array.isArray(own) ? own : [];
+    }
+    if (Array.isArray(value.metrics)) return value.metrics;
+    if (Array.isArray(value._metrics)) return value._metrics;
+    return [];
+  }
+
+  /** domain.Abelian.IsEqual, with the float tolerance a decoded payload needs. */
+  function abelianEqual(a, b, eps = 1e-9) {
+    if (a == null || b == null) return a === b;
+
+    if (abelianCount(a) !== abelianCount(b)) return false;
+
+    const ma = abelianMetrics(a);
+    const mb = abelianMetrics(b);
+    if (ma.length !== mb.length) return false;
+    for (let i = 0; i < ma.length; i++) {
+      if (Math.abs(ma[i] - mb[i]) > eps) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Fold `delta` into `target` position by position, in place.
+   *
+   * Nothing forces a collection to hold items of one metric width, so a narrower
+   * delta only touches the positions it carries. Unlike Go a wider delta widens
+   * the target instead of being truncated: here the width is discovered from the
+   * children as the tree is drilled, and dropping a column would lose a
+   * heatmap dimension for good.
+   *
+   * @param {number[] | undefined} target
+   * @param {number[] | undefined} delta
+   * @param {1 | -1} sign
+   * @returns {number[]} `target`, widened, or a fresh array when it was absent
+   */
+  function fold(target, delta, sign) {
+    const from = Array.isArray(delta) ? delta : [];
+    if (!Array.isArray(target)) {
+      const fresh = new Array(from.length);
+      for (let i = 0; i < from.length; i++) fresh[i] = sign * from[i];
+      return fresh;
+    }
+    if (from.length > target.length) {
+      const previous = target.length;
+      target.length = from.length;
+      for (let i = previous; i < from.length; i++) target[i] = 0;
+    }
+    for (let i = 0; i < from.length; i++) {
+      target[i] += sign * from[i];
+    }
+    return target;
+  }
+
+  /** domain.Abelian.Sum on the metrics vector. */
+  function abelianSum(target, delta) {
+    return fold(target, delta, 1);
+  }
+
+  /** domain.Abelian.Substract on the metrics vector. */
+  function abelianSubtract(target, delta) {
+    return fold(target, delta, -1);
+  }
+
+  /**
+   * Total mass of a list of children (cube cells, Sets and/or Items).
+   * @param {any[]} values
+   * @returns {{ count: number, metrics: number[] }}
+   */
+  function abelianTotal(values) {
+    let count = 0;
+    let metrics = [];
+    if (!Array.isArray(values)) {
+      return { count, metrics };
+    }
+    for (let i = 0; i < values.length; i++) {
+      count += abelianCount(values[i]);
+      metrics = abelianSum(metrics, abelianMetrics(values[i]));
+    }
+    return { count, metrics };
+  }
+
+  /**
+   * Client-side diagnostics for the read path.
+   *
+   * The Aggregate view is a tree of sums, and a sum reports a wrong answer the
+   * same way it reports a right one — silently. These channels exist so a bad
+   * number can be traced to the step that produced it: what the wire carried,
+   * what survived decoding, and what the refresh pass actually changed.
+   *
+   * Off by default. Enable from the console or from INIT:
+   *
+   *   __INDEXUS_DEBUG__ = true            // every channel
+   *   __INDEXUS_DEBUG__ = "sets,refresh"  // pick channels
+   */
+
+  /** @typedef {"sets" | "refresh" | "cube"} Channel */
+
+  const CHANNELS = ["sets", "refresh", "cube"];
+
+  /** @type {Set<string> | null} — null means "not configured, read the global". */
+  let enabled = null;
+
+  function fromGlobal() {
+    const raw = globalThis.__INDEXUS_DEBUG__;
+    if (raw === true) return new Set(CHANNELS);
+    if (typeof raw === "string" && raw.trim()) {
+      if (raw.trim() === "*") return new Set(CHANNELS);
+      return new Set(raw.split(",").map((s) => s.trim()).filter(Boolean));
+    }
+    return new Set();
+  }
+
+  /**
+   * @param {boolean | string | string[] | null} config
+   *   true / "*" for everything, a list to pick channels, false to silence.
+   */
+  function setDebug(config) {
+    if (config === true || config === "*") {
+      enabled = new Set(CHANNELS);
+    } else if (typeof config === "string") {
+      enabled = new Set(config.split(",").map((s) => s.trim()).filter(Boolean));
+    } else if (Array.isArray(config)) {
+      enabled = new Set(config);
+    } else {
+      enabled = new Set();
+    }
+    globalThis.__INDEXUS_DEBUG__ = enabled.size ? [...enabled].join(",") : false;
+  }
+
+  /**
+   * @param {Channel} channel
+   * @returns {boolean}
+   */
+  function debugEnabled(channel) {
+    // Re-read the global every call while unconfigured, so toggling
+    // `__INDEXUS_DEBUG__` from the console takes effect without a reload.
+    const active = enabled ?? fromGlobal();
+    return active.has(channel);
+  }
+
+  /**
+   * @param {Channel} channel
+   * @param {string} event
+   * @param {object} [fields] - flat key/value pairs, printed as one line.
+   */
+  function debugLog(channel, event, fields) {
+    if (!debugEnabled(channel)) return;
+    if (fields === undefined) {
+      console.info(`[indexus:${channel}] ${event}`);
+      return;
+    }
+    console.info(`[indexus:${channel}] ${event}`, fields);
+  }
+
+  /** Signed number, so a delta reads as a delta rather than as a value. */
+  function signed(n) {
+    if (!Number.isFinite(n)) return "n/a";
+    return n > 0 ? `+${n}` : String(n);
+  }
+
+  function create(xyz, bounds, count, metrics, items, children, hash) {
     return {
       xyz,
       bounds,
@@ -2392,11 +2969,21 @@
       metrics,
       items,
       children,
+      hash,
     };
   }
 
-  function equal(element1, element2) {
-    return JSON.stringify(element1) === JSON.stringify(element2);
+  /** Copy of `cell`, with the listed fields overridden. */
+  function derive(cell, changes) {
+    return create(
+      changes.xyz ?? cell.xyz,
+      changes.bounds ?? cell.bounds,
+      changes.count ?? cell.count,
+      changes.metrics ?? cell.metrics,
+      changes.items !== undefined ? changes.items : cell.items,
+      changes.children ?? cell.children,
+      changes.hash ?? cell.hash
+    );
   }
 
   function add(element) {
@@ -2408,64 +2995,145 @@
   }
 
   function key(xyz) {
-    const values = [xyz.resolution, ...xyz.coordinates];
-    return values.join("-");
+    let output = `${xyz.resolution}`;
+    for (let i = 0; i < xyz.coordinates.length; i++) {
+      output += `-${xyz.coordinates[i]}`;
+    }
+    return output;
   }
 
   function parent(xyz) {
     if (!xyz.resolution) {
       return null;
     }
+    const coordinates = new Array(xyz.coordinates.length);
+    for (let i = 0; i < xyz.coordinates.length; i++) {
+      coordinates[i] = Math.floor(xyz.coordinates[i] / 2);
+    }
     return {
       resolution: xyz.resolution - 1,
-      coordinates: xyz.coordinates.map((v) => Math.floor(v / 2)),
+      coordinates,
     };
   }
 
   function children(xyz) {
     const resolution = xyz.resolution + 1;
     const coordinates = xyz.coordinates;
-    const children = [];
+    const dimensions = coordinates.length;
+    const length = 2 ** dimensions;
+    const children = new Array(length);
 
-    const fill = (idx, current) => {
-      if (idx === coordinates.length) {
-        children.push({
-          resolution,
-          coordinates: current,
-        });
-        return;
+    for (let mask = 0; mask < length; mask++) {
+      const childCoordinates = new Array(dimensions);
+      for (let i = 0; i < dimensions; i++) {
+        const bit = (mask >> (dimensions - 1 - i)) & 1;
+        childCoordinates[i] = coordinates[i] * 2 + bit;
       }
-
-      fill(idx + 1, current.concat(coordinates[idx] * 2));
-      fill(idx + 1, current.concat(coordinates[idx] * 2 + 1));
-    };
-
-    fill(0, []);
-
+      children[mask] = {
+        resolution,
+        coordinates: childCoordinates,
+      };
+    }
     return children;
+  }
+
+  /** Carry an Abelian delta up the ancestor chain, as far as cells are loaded. */
+  function rollupDelta(xyz, dCount, dMetrics) {
+    let current = xyz;
+    while (current) {
+      const cell = this.get(current);
+      if (!cell) break;
+      this.add(
+        derive(cell, {
+          count: abelianCount(cell) + dCount,
+          metrics: abelianSum(abelianMetrics(cell).slice(), dMetrics),
+        })
+      );
+      current = this.parent(current);
+    }
   }
 
   function set(elements) {
     const parents = {};
     let keep = elements.length;
+    const trace = debugEnabled("cube")
+      ? { fresh: 0, unchanged: 0, patched: 0, countDelta: 0 }
+      : null;
 
-    elements.forEach((element) => {
+    for (let i = 0; i < elements.length; i++) {
+      const element = elements[i];
       const existing = this.get(element.xyz);
 
       if (existing) {
         keep--;
       }
 
-      if (!existing || existing.children.length === 0) {
+      const existingChildren = existing?.children;
+      const hasSubtree =
+        Array.isArray(existingChildren) && existingChildren.length > 0;
+
+      if (!existing || !hasSubtree) {
+        if (trace) trace.fresh++;
         this.add(element);
+      } else if (!abelianEqual(existing, element)) {
+        // Remote Abelian drifted during inserts: patch mass + adopt remote
+        // children links when the payload carries them (reconcile drill).
+        // Otherwise keep the live drilled children[]. Ancestor rollup via delta.
+        const previousCount = abelianCount(existing);
+        const previousMetrics = abelianMetrics(existing);
+        const count = abelianCount(element);
+        const metrics = abelianMetrics(element).slice();
+
+        if (trace) {
+          trace.patched++;
+          trace.countDelta += count - previousCount;
+        }
+
+        this.add(
+          derive(existing, {
+            xyz: element.xyz,
+            bounds: element.bounds,
+            count,
+            metrics,
+            items: element.items,
+            children: element.children?.length
+              ? element.children.slice()
+              : existingChildren,
+            hash: element.hash,
+          })
+        );
+
+        rollupDelta.call(
+          this,
+          this.parent(element.xyz),
+          count - previousCount,
+          abelianSubtract(metrics.slice(), previousMetrics)
+        );
+      } else if (trace) {
+        // Abelian equal + existing subtree → keep local tree (no churn)
+        trace.unchanged++;
       }
 
       this.merge(parents, element);
-    });
+    }
+
+    // Only the levels that actually corrected something are worth a line; the
+    // steady state is a wall of "unchanged".
+    if (trace && trace.patched > 0) {
+      debugLog("cube", "cells patched", {
+        resolution: elements[0]?.xyz?.resolution,
+        applied: elements.length,
+        fresh: trace.fresh,
+        patched: trace.patched,
+        unchanged: trace.unchanged,
+        countDelta: signed(trace.countDelta),
+      });
+    }
 
     if (keep) {
       this.set(Object.values(parents));
     }
+    this.current = {};
   }
 
   function merge$1(parents, element) {
@@ -2480,44 +3148,1239 @@
       parents[key] = this.create(
         xyz,
         this.space.bounds(xyz),
-        element.count,
-        element.metrics,
+        abelianCount(element),
+        abelianMetrics(element).slice(),
         undefined,
-        [element.xyz]
+        [element.xyz],
+        element.hash ? parent$1(element.hash) : undefined
       );
       return;
     }
 
-    parent.count += element.count;
-    parent.metrics = parent.metrics.map(
-      (metric, index) => metric + element.metrics[index]
-    );
+    parent.count += abelianCount(element);
+    parent.metrics = abelianSum(parent.metrics, abelianMetrics(element));
     parent.children.push(element.xyz);
   }
 
-  function retrieve(resolution, bounds, xyz, bypass) {
-    const element = this.get(xyz);
+  /**
+   * @param {"visual" | "items"} purpose
+   *   - visual: respect `options.limit` (seuil de zone ; 0 = ne coupe pas la descente sur ce seuil seul) and `options.children` (enfants complets).
+   *   - items: descend through every loaded branch; ignore `options.limit` so item counts / overlay
+   *     do not change when the user tweaks the zone subdivision threshold (only visual LOD changes).
+   */
+  function retrieve(resolution, bounds, xyz, bypass, purpose = "visual") {
+    const result = [];
+    const stack = [{ xyz, bypass }];
+    const needChildren =
+      purpose === "items" ? 1 : (this.options.children ?? 1);
 
-    if (!bypass) {
-      const { overlap, contained } = this.space.overlap(bounds, element.bounds);
+    while (stack.length > 0) {
+      const current = stack.pop();
+      const element = this.get(current.xyz);
+      if (!element) continue;
 
-      if (!overlap) return [];
+      let nextBypass = current.bypass;
+      if (!nextBypass) {
+        const { overlap, contained } = this.space.overlap(bounds, element.bounds);
+        if (!overlap) continue;
+        nextBypass = contained;
+      }
 
-      bypass = contained;
+      if (element.xyz.resolution === resolution) {
+        result.push(element);
+        continue;
+      }
+
+      if (purpose === "items") {
+        if (this.isCovered(element) && element.children.length < needChildren) {
+          result.push(element);
+          continue;
+        }
+      } else if (
+        this.isCovered(element) &&
+        (element.count <= this.options.limit ||
+          element.children.length < needChildren)
+      ) {
+        result.push(element);
+        continue;
+      }
+
+      if (!element.children.length) {
+        result.push(element);
+        continue;
+      }
+
+      for (let i = element.children.length - 1; i >= 0; i--) {
+        stack.push({ xyz: element.children[i], bypass: nextBypass });
+      }
     }
 
-    if (
-      element.xyz.resolution === resolution ||
-      (element.count <= this.options.limit && this.isCovered(element)) ||
-      !element.children.length
-    ) {
-      return [element];
-    }
-
-    return element.children.reduce((accumulator, child) => {
-      return accumulator.concat(this.retrieve(resolution, bounds, child, bypass));
-    }, []);
+    return result;
   }
+
+  /**
+   * Atomically swap a parent subtree: prune parent + descendants, then force-write
+   * `branchCells` (detached rebuild from reconcile). Does not run merge/rollup.
+   *
+   * @param {any} parentXyz
+   * @param {any[]} branchCells
+   */
+  function replaceBranch(parentXyz, branchCells) {
+    if (!parentXyz || !Array.isArray(branchCells)) return;
+
+    const stack = [parentXyz];
+    const seen = new globalThis.Set();
+    while (stack.length) {
+      const xyz = stack.pop();
+      const k = this.key(xyz);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const cell = this.get(xyz);
+      if (!cell) continue;
+      if (Array.isArray(cell.children)) {
+        for (let i = 0; i < cell.children.length; i++) {
+          stack.push(cell.children[i]);
+        }
+      }
+      delete this.data[k];
+    }
+
+    for (let i = 0; i < branchCells.length; i++) {
+      const element = branchCells[i];
+      if (!element?.xyz) continue;
+      this.add(
+        create(
+          element.xyz,
+          element.bounds,
+          abelianCount(element),
+          abelianMetrics(element).slice(),
+          element.items,
+          Array.isArray(element.children) ? element.children.slice() : [],
+          element.hash
+        )
+      );
+    }
+
+    this.current = {};
+  }
+
+  /**
+   * Remove cells deeper than `maxResolution` (exclusive upper bound on
+   * xyz.resolution) and drop dangling children links. Used after Aggregate
+   * refresh / zoom-out so over-fine disks from a previous LOD don't linger.
+   * @returns {number} count of removed cells
+   */
+  function pruneDeeperThan(maxResolution) {
+    if (!Number.isFinite(maxResolution)) return 0;
+    const max = Math.floor(maxResolution);
+    let removed = 0;
+    for (const k of Object.keys(this.data)) {
+      const cell = this.data[k];
+      if (!cell?.xyz) continue;
+      if (cell.xyz.resolution > max) {
+        delete this.data[k];
+        removed += 1;
+      }
+    }
+    if (removed === 0) return 0;
+    for (const cell of Object.values(this.data)) {
+      if (!Array.isArray(cell.children) || cell.children.length === 0) continue;
+      const kept = [];
+      for (let i = 0; i < cell.children.length; i++) {
+        if (this.get(cell.children[i])) kept.push(cell.children[i]);
+      }
+      cell.children = kept;
+    }
+    this.current = {};
+    return removed;
+  }
+
+  const DEFAULT_RECONCILE_MAX_PARENTS = 48;
+
+  function project(zoom, bounds) {
+    const result = [];
+
+    let currentZoom = zoom + this.options.resolution;
+    let currentBounds = this.space.extend(bounds, this.options.offset.bounds);
+
+    const integerZoom = Math.floor(currentZoom);
+    const fractionalZoom = currentZoom - integerZoom;
+
+    if (fractionalZoom !== 0) {
+      currentBounds = this.space.extend(currentBounds, -0.25 * fractionalZoom);
+      currentZoom = integerZoom;
+    }
+
+    const zoomMax = Math.floor(
+      zoom + this.options.resolution + this.options.offset.zoom
+    );
+
+    const step = Math.max(1, this.space.step);
+    let lastBoundsAtZoom = currentBounds;
+
+    for (let z = 0; z <= zoomMax; z++) {
+      let boundsAtZoom = currentBounds;
+
+      // if (z < currentZoom) {
+      //   const steps = currentZoom - z;
+      //   for (let s = 0; s < steps; s++) {
+      //     boundsAtZoom = this.space.extend(boundsAtZoom, 0.5);
+      //   }
+      // }
+
+      if (z > currentZoom) {
+        const steps = z - currentZoom;
+        for (let s = 0; s < steps; s++) {
+          boundsAtZoom = this.space.extend(boundsAtZoom, -0.25);
+        }
+      }
+
+      lastBoundsAtZoom = boundsAtZoom;
+
+      if (z % step === 0) {
+        result[z / step] = boundsAtZoom;
+      }
+    }
+
+    // Grid.move drills to hash depth = ceil(zoomMax / step). When zoomMax is
+    // not a multiple of step the loop above never wrote that index, so
+    // refresh called overlap(undefined, …) and crashed.
+    const maxHashDepth = Math.ceil(zoomMax / step);
+    if (result[maxHashDepth] == null) {
+      result[maxHashDepth] = lastBoundsAtZoom;
+    }
+
+    return result;
+  }
+
+  async function prefetchBatchSets(list, viewportBounds) {
+    const net = this.network;
+    if (!net || typeof net.getSets !== "function") {
+      return;
+    }
+
+    // `getSetsBatchSize === 0` disables prefetch; batching/chunking is handled by Network.setsPool.
+    const network = this.options?.network ?? {};
+    if (network.getSetsBatchSize === 0) {
+      return;
+    }
+
+    const spatialPrefetch = network.spatialPrefetch !== false;
+    const spatialChunkSize = Number.isFinite(network.spatialPrefetchChunkSize)
+      ? Math.max(4, Math.floor(network.spatialPrefetchChunkSize))
+      : 40;
+
+    /** Native `Set` — file imports entity `Set`, which shadows `globalThis.Set`. */
+    const NativeSet = globalThis.Set;
+
+    /** @type {Map<string, InstanceType<typeof NativeSet>>} */
+    const byColl = new Map();
+    for (let i = 0; i < list.length; i++) {
+      const element = list[i];
+      if (element._items) continue;
+      const collection = element._collection;
+      const location = element._hash;
+      if (!location) continue;
+      // Prefetch ROOT `@` too — Aggregate starts drilling there.
+      if (this.cache.has(zoneKey(collection, location))) continue;
+      if (!byColl.has(collection)) {
+        byColl.set(collection, new NativeSet());
+      }
+      byColl.get(collection).add(location);
+    }
+
+    const tasks = [...byColl.entries()].map(([collection, hashSet]) =>
+      spatialPrefetch && viewportBounds != null
+        ? prefetchCollectionSpatialChunks.call(
+            this,
+            net,
+            collection,
+            hashSet,
+            viewportBounds,
+            spatialChunkSize
+          )
+        : prefetchCollectionMerged(net, collection, hashSet)
+    );
+
+    await Promise.all(tasks);
+  }
+
+  /**
+   * Legacy path: one merged `/sets` request per collection (maximum HTTP merging).
+   */
+  async function prefetchCollectionMerged(net, collection, hashSet) {
+    await net.getSets(collection, [...hashSet]);
+  }
+
+  /**
+   * Viewport-first: sort parent hashes by overlap with `viewportBounds`, then center distance;
+   * prefetch sequentially in chunks so nearer rings populate the Network cache before farther ones.
+   */
+  async function prefetchCollectionSpatialChunks(
+    net,
+    collection,
+    hashSet,
+    viewportBounds,
+    chunkSize
+  ) {
+    const hashes = [...hashSet];
+    const ranked = new Array(hashes.length);
+    for (let i = 0; i < hashes.length; i++) {
+      const hash = hashes[i];
+      const bounds = this.getGeometry(hash).bounds;
+      ranked[i] = {
+        hash,
+        rank: viewportPrefetchRank(this.space, viewportBounds, bounds),
+      };
+    }
+    ranked.sort((a, b) => compareViewportPrefetchRank(a.rank, b.rank));
+
+    for (let i = 0; i < ranked.length; i += chunkSize) {
+      const slice = ranked.slice(i, i + chunkSize).map((r) => r.hash);
+      await net.getSets(collection, slice);
+    }
+  }
+
+  function viewportPrefetchRank(space, viewportBounds, cellBounds) {
+    const o = space.overlap(viewportBounds, cellBounds);
+    const distSq = viewportCenterDistSq(space, viewportBounds, cellBounds);
+    return {
+      overlaps: o.overlap,
+      contained: o.contained,
+      distSq,
+    };
+  }
+
+  function compareViewportPrefetchRank(a, b) {
+    if (a.overlaps !== b.overlaps) {
+      return a.overlaps ? -1 : 1;
+    }
+    if (a.contained !== b.contained) {
+      return a.contained ? -1 : 1;
+    }
+    return a.distSq - b.distSq;
+  }
+
+  /**
+   * Cheap squared separation between segment centers (any dimension arity via point.value()).
+   */
+  function viewportCenterDistSq(space, viewportBounds, cellBounds) {
+    const cv = space.center(viewportBounds);
+    const cc = space.center(cellBounds);
+    let sum = 0;
+    for (let i = 0; i < cv.length; i++) {
+      const va = cv[i].value();
+      const vb = cc[i].value();
+      const n = Math.min(va.length, vb.length);
+      for (let k = 0; k < n; k++) {
+        const d = va[k] - vb[k];
+        sum += d * d;
+      }
+    }
+    return sum;
+  }
+
+  async function refresh(id, list, bounds, depth, current = 0) {
+    const candidates = this.arrayPool.acquire();
+    const selected = this.arrayPool.acquire();
+    const seen = this.seenPool.acquire();
+    candidates.length = 0;
+    selected.length = 0;
+    const requestedConcurrency =
+      typeof this.network?.getConcurrency === "function"
+        ? this.network.getConcurrency()
+        : list.length;
+    const concurrency = Math.max(1, Math.floor(requestedConcurrency || 1));
+    const targetBounds = bounds[current];
+
+    try {
+      await prefetchBatchSets.call(this, list, targetBounds);
+
+      await asyncPool(concurrency, list, async (element) => {
+        const elements = await this.process(element);
+        for (let i = 0; i < elements.length; i++) {
+          candidates.push(elements[i]);
+        }
+      });
+      dedupeElementsInPlace(candidates, seen);
+
+      await filterOverlaps.call(
+        this,
+        targetBounds,
+        candidates,
+        selected
+      );
+
+      let total = 0;
+      for (let i = 0; i < list.length; i++) {
+        if (!list[i]._items) total++;
+      }
+
+      this.monitoring.send(
+        new Monitoring(current, State.Refresh, {
+          id: id,
+          depth: current,
+          bounds: bounds[current],
+          size: total,
+        })
+      );
+
+      if (id === this.current.id) {
+        if (selected.length > 0 && current < depth) {
+          await this.refresh(id, selected, bounds, depth, current + 1);
+        } else {
+          this.stream.flushNow();
+          this.finish(id);
+        }
+      }
+    } finally {
+      this.seenPool.release(seen);
+      this.arrayPool.release(candidates);
+      this.arrayPool.release(selected);
+    }
+  }
+
+  function dedupeElementsInPlace(elements, seen) {
+    if (!Array.isArray(elements) || elements.length === 0) return;
+    let write = 0;
+    for (let i = 0; i < elements.length; i++) {
+      const element = elements[i];
+      if (!element) continue;
+      const key = zoneKey(element._collection, element._hash);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      elements[write] = element;
+      write++;
+    }
+    elements.length = write;
+    seen.clear();
+  }
+
+  async function filterOverlaps(targetBounds, candidates, selected) {
+    if (!targetBounds || !Array.isArray(candidates) || candidates.length === 0) {
+      return;
+    }
+
+    const usedGpu =
+      this.overlapAccelerator &&
+      (await this.overlapAccelerator.selectOverlapping(
+        targetBounds,
+        candidates,
+        selected
+      ));
+    if (usedGpu) return;
+
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i];
+      if (!candidate?._bounds) continue;
+      if (!this.space.overlap(targetBounds, candidate._bounds).overlap) continue;
+      selected.push(candidate);
+    }
+  }
+
+  /**
+   * Fetch children for one parent via batched `/sets` (sticky ingress).
+   * @param {{ getSets: Function }} net
+   * @param {string} collection
+   * @param {string} location
+   * @param {boolean} [refresh]
+   * @returns {Promise<any[]>}
+   */
+  async function fetchChildren(net, collection, location, refresh = false) {
+    const children = await fetchChildrenOf(net, collection, [location], refresh);
+    const own = children?.get?.(location);
+    return Array.isArray(own) ? own : [];
+  }
+
+  /**
+   * Warm the Network `/sets` cache for many parents in one coalesce wave.
+   * Network.getSets already dedupes and chunks the locations.
+   * @param {{ getSets: Function }} net
+   * @param {string} collection
+   * @param {string[]} locations
+   * @param {boolean} [refresh] - the reconcile pass sets it: dropping our own
+   *   cache re-reads the node's, which is the copy that went stale.
+   */
+  async function fetchChildrenOf(net, collection, locations, refresh = false) {
+    if (!net || typeof net.getSets !== "function") {
+      return new Map();
+    }
+    return net.getSets(collection, locations.filter(Boolean), { refresh });
+  }
+
+  async function process$1(element) {
+    const collection = element._collection;
+    const location = element._hash;
+    const key = zoneKey(collection, location);
+
+    const processed = this.getProcessed(key);
+    if (processed !== undefined) return processed;
+
+    let set = element._items;
+    let cacheableSource = Array.isArray(set);
+
+    if (!set) {
+      try {
+        set = await fetchChildren(this.network, collection, location);
+        cacheableSource = Array.isArray(set);
+      } catch (error) {
+        console.error(`Error processing element ${element}:`, error);
+      }
+    }
+
+    const depth = locationDepth(location);
+    const elements = [];
+    const streamElements = [];
+    const merged = {};
+    const source = Array.isArray(set) ? set : [];
+
+    for (let i = 0; i < source.length; i++) {
+      const elm = source[i];
+      if (elm instanceof Item$1) {
+        this.consolidate(merged, depth + 1, elm);
+        continue;
+      }
+
+      // Nodes sometimes list a zone under itself. Drilling a self-key recurses
+      // forever and blocks the heatmap.
+      if (!isDirectChild(location, elm._hash)) {
+        continue;
+      }
+
+      if (!elm._bounds || !elm._xyz) {
+        const geometry = this.getGeometry(elm._hash);
+        elm._bounds = geometry.bounds;
+        elm._xyz = geometry.xyz;
+      }
+      elements.push(elm);
+      streamElements.push(toCubeElement(elm, true));
+    }
+
+    const mergedValues = Object.values(merged);
+    for (let i = 0; i < mergedValues.length; i++) {
+      const mergedElement = mergedValues[i];
+      elements.push(mergedElement);
+      streamElements.push(toCubeElement(mergedElement, false));
+    }
+
+    if (cacheableSource) {
+      this.putProcessed(key, elements);
+    }
+    if (streamElements.length > 0) {
+      this.stream.enqueue(streamElements);
+      if (this.options?.stream?.progressive === true) {
+        this.stream.flushNow();
+      }
+    }
+
+    return elements;
+  }
+
+  function toCubeElement(element, reusable) {
+    if (reusable && element.__cubeElement) {
+      return element.__cubeElement;
+    }
+
+    const cell = create(
+      element._xyz,
+      element._bounds,
+      element._count,
+      element._metrics,
+      element._items,
+      [],
+      element._hash
+    );
+
+    if (reusable) {
+      element.__cubeElement = cell;
+    }
+
+    return cell;
+  }
+
+  function consolidate(merged, length, elm) {
+    const location = elm._hash.substring(0, length);
+    const set = merged[location];
+
+    if (!set) {
+      const created = new Set$1(
+        elm._collection,
+        location,
+        1,
+        abelianMetrics(elm).slice()
+      );
+
+      const geometry = this.getGeometry(location);
+      created._bounds = geometry.bounds;
+      created._xyz = geometry.xyz;
+      created._items = [elm];
+
+      merged[location] = created;
+      return;
+    }
+
+    set._count++;
+    set._items.push(elm);
+    set._metrics = abelianSum(set._metrics, abelianMetrics(elm));
+  }
+
+  /** Location a Set or Item carries, whichever shape the payload arrived in. */
+  function elementLocation(element) {
+    if (!element) return null;
+    if (element._hash) return element._hash;
+    return typeof element.hash === "function" ? element.hash() : null;
+  }
+
+  /**
+   * Location of a cube cell (inverse of space.xyz).
+   * Prefer the explicit location on the cell, then re-encode from `bounds`
+   * (decode geometry). Do not rebuild bounds from xyz alone — fractional
+   * resolutions make `space._bounds(xyz)` non-invertible with encode.
+   *
+   * @param {import("../entities/space.js").Space} space
+   * @param {{ xyz?: { resolution: number, coordinates: number[] }, bounds?: any, hash?: string }} cell
+   * @param {any} [boundsHint]
+   * @returns {string}
+   */
+  function cellLocation(space, cell, boundsHint) {
+    if (!cell) return ROOT;
+    if (typeof cell === "string") return cell;
+    if (cell.hash) return cell.hash;
+
+    const xyz = cell.xyz || cell;
+    if (!xyz || !xyz.resolution || !Array.isArray(xyz.coordinates)) {
+      return ROOT;
+    }
+    const bounds = boundsHint || cell.bounds;
+    if (!bounds) return null;
+
+    const dimensions = xyz.coordinates.length || 1;
+    const precision = Math.round((xyz.resolution * dimensions) / 6);
+    if (precision <= 0) return ROOT;
+    return space.encode(space.center(bounds), precision);
+  }
+
+  /** Remote Sets that are one encoding step below `location`, Items excluded. */
+  function remoteSetChildren(location, children) {
+    /** @type {{ set: any, location: string }[]} */
+    const sets = [];
+    if (!Array.isArray(children)) return sets;
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      if (!child || child instanceof Item$1) continue;
+      const childLocation = elementLocation(child);
+      if (!isDirectChild(location, childLocation)) continue;
+      sets.push({ set: child, location: childLocation });
+    }
+    return sets;
+  }
+
+  /**
+   * True when remote children membership drifted even if Abelian mass matches.
+   * @returns {false | { reason: string, localChildren: number, remoteSets: number }}
+   */
+  function childrenMembershipDrift(local, remoteChildren, cube, space) {
+    const localChildren = Array.isArray(local?.children) ? local.children : [];
+    const remote = Array.isArray(remoteChildren) ? remoteChildren : [];
+
+    let remoteSets = 0;
+    /** @type {globalThis.Set<string>} */
+    const remoteLocations = new globalThis.Set();
+    for (let i = 0; i < remote.length; i++) {
+      const child = remote[i];
+      if (!child || child instanceof Item$1) continue;
+      remoteSets += 1;
+      const location = elementLocation(child);
+      if (location) remoteLocations.add(location);
+    }
+
+    if (localChildren.length === 0) {
+      if (remoteSets > 0) {
+        return { reason: "local-empty-remote-has-sets", localChildren: 0, remoteSets };
+      }
+      return false;
+    }
+    if (localChildren.length !== remoteSets && remoteSets > 0) {
+      return {
+        reason: "set-count-mismatch",
+        localChildren: localChildren.length,
+        remoteSets,
+      };
+    }
+    if (localChildren.length !== remote.length && remoteSets === 0) {
+      return {
+        reason: "remote-items-only-vs-local-links",
+        localChildren: localChildren.length,
+        remoteSets: 0,
+        remoteRows: remote.length,
+      };
+    }
+    if (remoteLocations.size === 0) return false;
+
+    for (let i = 0; i < localChildren.length; i++) {
+      const xyz = localChildren[i];
+      const location = cellLocation(space, cube.get?.(xyz) || { xyz });
+      if (!location || location === ROOT) continue;
+      if (!remoteLocations.has(location)) {
+        return {
+          reason: "local-child-missing-remotely",
+          localChildren: localChildren.length,
+          remoteSets,
+          missingLocation: location,
+        };
+      }
+    }
+    return false;
+  }
+
+  /**
+   * One reconcile walk. The state is passed around explicitly rather than
+   * captured: the DFS below rewrites cube branches as it unwinds, and closures
+   * hid which step had touched what.
+   *
+   * @typedef {{
+   *   grid: any,
+   *   cube: import("../cube/index.js").Cube,
+   *   collection: string,
+   *   bounds: any,
+   *   maxDepth: number,
+   *   maxReplaces: number,
+   *   replaced: string[],
+   *   visiting: globalThis.Set<string>,
+   *   dirty: number,
+   *   read: number,
+   * }} Reconcile
+   */
+
+  function locationDepth(location) {
+    return location === ROOT ? 0 : location.length;
+  }
+
+  /** True when `location` is `ancestor` or sits below it. */
+  function covers(ancestor, location) {
+    return ancestor === ROOT || location.startsWith(ancestor);
+  }
+
+  /** A branch replaced earlier in the pass is authoritative; leave it alone. */
+  function alreadyReplaced(pass, location) {
+    return pass.replaced.some((replaced) => covers(replaced, location));
+  }
+
+  function invalidate(pass, location) {
+    pass.grid.invalidate(pass.collection, location);
+    pass.grid.network.invalidate(pass.collection, location);
+  }
+
+  function overlapsViewport(pass, location) {
+    const { grid, bounds } = pass;
+    if (!bounds || !grid?.space?.overlap) return true;
+    try {
+      return grid.space.overlap(bounds, grid.getGeometry(location).bounds).overlap;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Walk `location` down `remaining` steps of Set children, appending detached
+   * cells to `cells`. Items fold into their parent's Abelian.
+   */
+  async function walkShadow(pass, location, geometry, remaining, cells) {
+    invalidate(pass, location);
+
+    let children = [];
+    try {
+      children = await fetchChildren(
+        pass.grid.network,
+        pass.collection,
+        location,
+        true
+      );
+    } catch (error) {
+      console.warn("[aggregate.reconcile] shadow getSets failed:", location, error);
+    }
+
+    const remote = abelianTotal(children);
+    const links = [];
+    cells.push(
+      create(
+        geometry.xyz,
+        geometry.bounds,
+        remote.count,
+        remote.metrics,
+        undefined,
+        links,
+        location
+      )
+    );
+
+    if (remaining <= 0) return;
+
+    const sets = remoteSetChildren(location, children);
+    const geometries = sets.map((child) => pass.grid.getGeometry(child.location));
+    for (let i = 0; i < geometries.length; i++) {
+      links.push(geometries[i].xyz);
+    }
+
+    // Batch-warm `/sets` for the whole sibling ring before descending.
+    await fetchChildrenOf(
+      pass.grid.network,
+      pass.collection,
+      sets.map((child) => child.location),
+      true
+    );
+    for (let i = 0; i < sets.length; i++) {
+      await walkShadow(pass, sets[i].location, geometries[i], remaining - 1, cells);
+    }
+  }
+
+  /** Swap the whole branch under `location` for a freshly drilled one. */
+  async function replaceBranchAt(pass, location) {
+    if (pass.dirty >= pass.maxReplaces || alreadyReplaced(pass, location)) {
+      return false;
+    }
+
+    const geometry = pass.grid.getGeometry(location);
+    const cells = [];
+    try {
+      await walkShadow(
+        pass,
+        location,
+        geometry,
+        Math.max(1, pass.maxDepth - locationDepth(location)),
+        cells
+      );
+    } catch (error) {
+      console.warn("[aggregate.reconcile] shadow branch failed:", location, error);
+      return false;
+    }
+    if (cells.length === 0) return false;
+
+    pass.cube.replaceBranch(geometry.xyz, cells);
+    pass.cube.current = {};
+    pass.replaced.push(location);
+    pass.dirty += 1;
+    return true;
+  }
+
+  /**
+   * Rewrite the parent cell from remote children plus the cube kids already
+   * installed. Unlike replaceBranch on the parent, this keeps child subtrees.
+   */
+  function recalculateParent(pass, location, children) {
+    try {
+      const remote = abelianTotal(children);
+      const links = [];
+
+      const sets = remoteSetChildren(location, children);
+      for (let i = 0; i < sets.length; i++) {
+        const child = sets[i];
+        if (!overlapsViewport(pass, child.location)) continue;
+        const childGeometry = pass.grid.getGeometry(child.location);
+        const cell = pass.cube.get(childGeometry.xyz);
+        if (cell) {
+          cell.hash = cell.hash || child.location;
+        } else {
+          pass.cube.add(
+            create(
+              childGeometry.xyz,
+              childGeometry.bounds,
+              abelianCount(child.set),
+              abelianMetrics(child.set).slice(),
+              undefined,
+              [],
+              child.location
+            )
+          );
+        }
+        links.push(childGeometry.xyz);
+      }
+
+      const geometry = pass.grid.getGeometry(location);
+      pass.cube.add(
+        create(
+          geometry.xyz,
+          geometry.bounds,
+          remote.count,
+          remote.metrics,
+          pass.cube.get(geometry.xyz)?.items,
+          links,
+          location
+        )
+      );
+      pass.cube.current = {};
+    } catch (error) {
+      console.warn(
+        "[aggregate.reconcile] recalculate parent failed:",
+        location,
+        error
+      );
+    }
+  }
+
+  /**
+   * Dig the dirty children first, then recalculate this parent from remote.
+   * `prefetched` skips the on-wire read when the caller already holds this
+   * location's children (the root probe in {@link reconcileVisible}).
+   *
+   * @param {Reconcile} pass
+   * @param {string} location
+   * @param {any[] | null} [prefetched]
+   * @returns {Promise<boolean>} true when this subtree changed
+   */
+  async function dig(pass, location, prefetched = null) {
+    if (pass.dirty >= pass.maxReplaces) return false;
+    if (pass.visiting.has(location) || alreadyReplaced(pass, location)) {
+      return false;
+    }
+    pass.visiting.add(location);
+
+    try {
+      let children = Array.isArray(prefetched) ? prefetched : null;
+      if (!children) {
+        try {
+          children = await fetchChildren(
+            pass.grid.network,
+            pass.collection,
+            location,
+            true
+          );
+        } catch (error) {
+          console.warn("[aggregate.reconcile] getSets failed:", location, error);
+          return false;
+        }
+        pass.read += 1;
+      }
+
+      const geometry = pass.grid.getGeometry(location);
+      const local =
+        pass.cube.get(geometry.xyz) ??
+        create(geometry.xyz, geometry.bounds, 0, [], undefined, [], location);
+
+      // Clean means both: the same mass, and the same children under it. Equal
+      // mass alone hides a sibling that arrived while another one left.
+      if (abelianEqual(local, abelianTotal(children))) {
+        const drift = childrenMembershipDrift(
+          local,
+          children,
+          pass.cube,
+          pass.grid.space
+        );
+        if (!drift) return false;
+      }
+
+      const sets = remoteSetChildren(location, children).filter((child) =>
+        overlapsViewport(pass, child.location)
+      );
+
+      if (locationDepth(location) >= pass.maxDepth || sets.length === 0) {
+        return replaceBranchAt(pass, location);
+      }
+
+      /** Children the cube never saw, and children whose mass drifted. */
+      const missing = [];
+      const drifted = [];
+      for (let i = 0; i < sets.length; i++) {
+        const child = sets[i];
+        const cell = pass.cube.get(pass.grid.getGeometry(child.location).xyz);
+        if (!cell) {
+          missing.push(child.location);
+        } else if (!abelianEqual(cell, child.set)) {
+          drifted.push(child.location);
+        }
+      }
+
+      // Descend one level at a time: only the dirty sibling ring is read next.
+      // Their `/sets` answers carry the next Abelian delta, same as `@` did.
+      const stale = [...missing, ...drifted];
+      if (stale.length > 0) {
+        for (let i = 0; i < stale.length; i++) {
+          invalidate(pass, stale[i]);
+        }
+        await fetchChildrenOf(pass.grid.network, pass.collection, stale, true);
+
+        for (let i = 0; i < missing.length; i++) {
+          await replaceBranchAt(pass, missing[i]);
+        }
+        for (let i = 0; i < drifted.length; i++) {
+          await dig(pass, drifted[i]);
+        }
+      }
+
+      // Refresh this parent from remote whatever happened below. Never
+      // replaceBranch here: that would re-drill the whole subtree.
+      recalculateParent(pass, location, children);
+      return true;
+    } finally {
+      pass.visiting.delete(location);
+    }
+  }
+
+  /**
+   * Distant-delta repair: one `/sets` on `@` first. That answer is the whole
+   * tree's Abelian — when it matches the cube, stop. Only when `@` moved (or
+   * its child membership drifted) walk down, reading each dirty sibling ring
+   * before descending further.
+   *
+   * @param {number} zoom
+   * @param {any} bounds
+   * @param {import("../cube/index.js").Cube} cube
+   * @param {{ maxParents?: number }} [opts]
+   * @returns {Promise<{ dirty: number, rootBefore?: number, rootAfter?: number, zonesRead?: number }>}
+   */
+  async function reconcileVisible(zoom, bounds, cube, opts = {}) {
+    if (!this.network || !cube || zoom == null || bounds == null) {
+      return { dirty: 0 };
+    }
+    if (!this.network._hosts?.length) return { dirty: 0 };
+    if (globalThis.__INDEXUS_BEARER__ === "") return { dirty: 0 };
+
+    const targetXyz = Math.floor(
+      zoom + this.options.resolution + this.options.offset.zoom
+    );
+
+    /** @type {Reconcile} */
+    const pass = {
+      grid: this,
+      cube,
+      collection: this.collection,
+      bounds,
+      maxDepth: Math.max(0, Math.ceil(targetXyz / Math.max(1, this.space.step))),
+      maxReplaces: Number.isFinite(opts.maxParents)
+        ? Math.max(1, Math.floor(opts.maxParents))
+        : DEFAULT_RECONCILE_MAX_PARENTS,
+      replaced: [],
+      visiting: new globalThis.Set(),
+      dirty: 0,
+      read: 0,
+    };
+
+    const rootXyz = this.getGeometry(ROOT).xyz;
+    const before = abelianCount(cube.get(rootXyz) ?? { count: 0 });
+    const startedAt = Date.now();
+
+    // Always the first (and often only) on-wire read of a quiet pass.
+    invalidate(pass, ROOT);
+    let rootChildren;
+    try {
+      rootChildren = await fetchChildren(
+        this.network,
+        this.collection,
+        ROOT,
+        true
+      );
+    } catch (error) {
+      console.warn("[aggregate.reconcile] root getSets failed:", error);
+      return {
+        dirty: 0,
+        rootBefore: before,
+        rootAfter: before,
+        zonesRead: 0,
+      };
+    }
+    pass.read += 1;
+
+    const rootLocal =
+      cube.get(rootXyz) ??
+      create(rootXyz, this.getGeometry(ROOT).bounds, 0, [], undefined, [], ROOT);
+    const rootRemote = abelianTotal(rootChildren);
+    if (abelianEqual(rootLocal, rootRemote)) {
+      const drift = childrenMembershipDrift(
+        rootLocal,
+        rootChildren,
+        cube,
+        this.space
+      );
+      if (!drift) {
+        if (debugEnabled("refresh")) {
+          debugLog("refresh", "root quiet — skip subzones", {
+            collection: this.collection,
+            rootCount: before,
+            zonesRead: pass.read,
+            ms: Date.now() - startedAt,
+          });
+        }
+        return {
+          dirty: 0,
+          rootBefore: before,
+          rootAfter: before,
+          zonesRead: pass.read,
+        };
+      }
+    }
+
+    await dig(pass, ROOT, rootChildren);
+
+    const after = abelianCount(cube.get(rootXyz) ?? { count: 0 });
+
+    if (debugEnabled("refresh")) {
+      debugLog("refresh", "pass done", {
+        collection: this.collection,
+        maxDepth: pass.maxDepth,
+        zonesRead: pass.read,
+        branchesReplaced: pass.dirty,
+        rootBefore: before,
+        rootAfter: after,
+        rootDelta: signed(after - before),
+        ms: Date.now() - startedAt,
+      });
+      if (pass.read > 0 && pass.dirty === 0 && after === before) {
+        debugLog("refresh", "nothing moved — the mesh and the cube agree");
+      }
+    }
+
+    return {
+      dirty: pass.dirty,
+      rootBefore: before,
+      rootAfter: after,
+      zonesRead: pass.read,
+    };
+  }
+
+  class Grid {
+    constructor(collection, space, options, stream, finish, monitoring, network) {
+      this.collection = collection;
+      this.space = space;
+      this.options = options;
+      this.streamOutput = stream;
+      this.finish = finish;
+      this.monitoring = monitoring;
+      this.network = network;
+
+      this.current = {};
+      this.cache = new Map();
+      this.arrayPool = createArrayPool(8);
+      this.seenPool = createSetPool(4);
+      const gpuOptions = options && typeof options.gpu === "object" ? options.gpu : {};
+      this.overlapAccelerator = createGpuOverlapAccelerator({
+        enabled: gpuOptions.enabled !== false,
+        minElements: Number.isFinite(gpuOptions.minElements)
+          ? Math.max(1, Math.floor(gpuOptions.minElements))
+          : 1024,
+      });
+      const geometryCacheSize =
+        options &&
+        options.cache &&
+        Number.isFinite(options.cache.geometrySize)
+          ? Math.max(256, Math.floor(options.cache.geometrySize))
+          : 20000;
+      this.geometryCache = new Map();
+      this.geometryCacheSize = geometryCacheSize;
+      this.cacheSize =
+        options && options.cache && Number.isFinite(options.cache.zoneSize)
+          ? Math.max(256, Math.floor(options.cache.zoneSize))
+          : 40000;
+      this.root = new Set$1(collection, ROOT, undefined, undefined);
+
+      const streamOptions =
+        options && typeof options.stream === "object" ? options.stream : {};
+      const streamProgressive = streamOptions.progressive === true;
+      const defaultMinBatch = streamProgressive ? 8 : 128;
+      const defaultFlushMs = streamProgressive ? 4 : 16;
+      const minBatch = Number.isFinite(streamOptions.minBatch)
+        ? Math.max(1, Math.floor(streamOptions.minBatch))
+        : defaultMinBatch;
+      const flushMs = Number.isFinite(streamOptions.flushMs)
+        ? Math.max(0, Math.floor(streamOptions.flushMs))
+        : defaultFlushMs;
+
+      this.stream = createStreamCoalescer({
+        minBatch,
+        flushMs,
+        applyBatch: (elements) => this.streamOutput(elements),
+      });
+    }
+
+    /**
+     * @param {number} zoom
+     * @param {any} bounds
+     * @param {{ force?: boolean }} [opts] — force=true re-drills even if the
+     *   viewport hash is unchanged (needed after reconcile replaceBranch).
+     */
+    async move(zoom, bounds, opts = {}) {
+      // Hash precision must cover cube.display's xyz LOD (zoom+resolution).
+      // ceil avoids short-drilling (e.g. xyz target 11 → need 4 chars, not 3).
+      const targetXyz = Math.floor(
+        zoom + this.options.resolution + this.options.offset.zoom
+      );
+      const depth = Math.max(
+        0,
+        Math.ceil(targetXyz / Math.max(1, this.space.step))
+      );
+      const hash = this.space.encode(this.space.center(bounds), depth);
+
+      if (!opts.force && this.current.hash === hash) return;
+
+      // Ensure previous trailing stream batches are visible before
+      // scheduling a new traversal wave.
+      this.stream.flushNow();
+
+      const id = crypto.randomUUID();
+      this.current = { hash, id };
+
+      await this.refresh(id, [this.root], this.project(zoom, bounds), depth);
+    }
+
+    getGeometry(location) {
+      if (this.geometryCache.has(location)) {
+        const cached = this.geometryCache.get(location);
+        this.geometryCache.delete(location);
+        this.geometryCache.set(location, cached);
+        return cached;
+      }
+
+      const geometry = {
+        bounds: this.space.decode(location),
+        xyz: this.space.xyz(location),
+      };
+
+      if (this.geometryCache.size >= this.geometryCacheSize) {
+        const firstKey = this.geometryCache.keys().next().value;
+        this.geometryCache.delete(firstKey);
+      }
+      this.geometryCache.set(location, geometry);
+      return geometry;
+    }
+
+    /**
+     * Processed children for one zone, moved to the LRU tail when present.
+     * @param {string} key
+     */
+    getProcessed(key) {
+      if (!this.cache.has(key)) return undefined;
+      const cached = this.cache.get(key);
+      this.cache.delete(key);
+      this.cache.set(key, cached);
+      return cached;
+    }
+
+    /**
+     * @param {string} key
+     * @param {any[]} elements
+     */
+    putProcessed(key, elements) {
+      if (!this.cache.has(key) && this.cache.size >= this.cacheSize) {
+        this.cache.delete(this.cache.keys().next().value);
+      }
+      this.cache.set(key, elements);
+    }
+
+    /**
+     * Drop the processed-children cache entry for one zone.
+     * @param {string} collection
+     * @param {string} location
+     */
+    invalidate(collection, location) {
+      if (collection == null || location == null) return;
+      this.cache.delete(zoneKey(collection, location));
+    }
+  }
+
+  Grid.prototype.project = project;
+  Grid.prototype.refresh = refresh;
+  Grid.prototype.process = process$1;
+  Grid.prototype.consolidate = consolidate;
+  Grid.prototype.reconcileVisible = reconcileVisible;
 
   function aggregate(data) {
     if (!data.length) return;
@@ -2526,38 +4389,62 @@
 
     let min = 0,
       max = 0;
+    const dimensions = this.space.dimensions;
 
-    this.space.dimensions.forEach((dimension, i) => {
+    for (let i = 0; i < dimensions.length; i++) {
+      const dimension = dimensions[i];
       const groups = {};
 
       min = max;
       max += dimension.pointLength();
+      const coordinateCount = max - min;
 
-      data.forEach((elm) => {
-        const xyz = {
-          resolution: elm.xyz.resolution,
-          coordinates: elm.xyz.coordinates.slice(min, max),
-        };
-        const key = this.key(xyz);
+      for (let j = 0; j < data.length; j++) {
+        const elm = data[j];
+        const sourceCoordinates = elm.xyz.coordinates;
+        let key = `${elm.xyz.resolution}`;
+        for (let c = 0; c < coordinateCount; c++) {
+          key += `-${sourceCoordinates[min + c]}`;
+        }
 
         if (!groups[key]) {
+          const coordinates = new Array(coordinateCount);
+          for (let c = 0; c < coordinateCount; c++) {
+            coordinates[c] = sourceCoordinates[min + c];
+          }
+          const xyz = {
+            resolution: elm.xyz.resolution,
+            coordinates,
+          };
+          const metricLength = Array.isArray(elm.metrics) ? elm.metrics.length : 0;
+          const metrics = new Array(metricLength);
+          for (let m = 0; m < metricLength; m++) metrics[m] = 0;
           groups[key] = {
-            xyz: xyz,
+            xyz,
             bounds: elm.bounds[i],
             count: 0,
-            metrics: Array(elm.metrics.length).fill(0),
+            metrics,
           };
         }
 
         const group = groups[key];
         group.count += elm.count;
-        elm.metrics.forEach((m, idx) => {
-          group.metrics[idx] += m;
-        });
-      });
+        const metrics = elm.metrics;
+        if (!Array.isArray(metrics)) continue;
+        if (metrics.length > group.metrics.length) {
+          const previousLength = group.metrics.length;
+          group.metrics.length = metrics.length;
+          for (let m = previousLength; m < metrics.length; m++) {
+            group.metrics[m] = 0;
+          }
+        }
+        for (let m = 0; m < metrics.length; m++) {
+          group.metrics[m] += metrics[m];
+        }
+      }
 
       result.push(groups);
-    });
+    }
 
     return result;
   }
@@ -2600,7 +4487,6 @@
   }
 
   Cube.prototype.create = create;
-  Cube.prototype.equal = equal;
   Cube.prototype.add = add;
   Cube.prototype.get = get;
   Cube.prototype.key = key;
@@ -2609,189 +4495,10 @@
   Cube.prototype.set = set;
   Cube.prototype.merge = merge$1;
   Cube.prototype.retrieve = retrieve;
+  Cube.prototype.replaceBranch = replaceBranch;
+  Cube.prototype.pruneDeeperThan = pruneDeeperThan;
 
   Cube.prototype.aggregate = aggregate;
-
-  function project(zoom, bounds) {
-    const result = [];
-
-    let currentZoom = zoom + this.options.resolution;
-    let currentBounds = this.space.extend(bounds, this.options.offset.bounds);
-
-    const integerZoom = Math.floor(currentZoom);
-    const fractionalZoom = currentZoom - integerZoom;
-
-    if (fractionalZoom !== 0) {
-      currentBounds = this.space.extend(currentBounds, -0.25 * fractionalZoom);
-      currentZoom = integerZoom;
-    }
-
-    const zoomMax = Math.floor(
-      zoom + this.options.resolution + this.options.offset.zoom
-    );
-
-    for (let z = 0; z <= zoomMax; z++) {
-      let boundsAtZoom = currentBounds;
-
-      // if (z < currentZoom) {
-      //   const steps = currentZoom - z;
-      //   for (let s = 0; s < steps; s++) {
-      //     boundsAtZoom = this.space.extend(boundsAtZoom, 0.5);
-      //   }
-      // }
-
-      if (z > currentZoom) {
-        const steps = z - currentZoom;
-        for (let s = 0; s < steps; s++) {
-          boundsAtZoom = this.space.extend(boundsAtZoom, -0.25);
-        }
-      }
-
-      if (z % this.space.step === 0) {
-        result[z / this.space.step] = boundsAtZoom;
-      }
-    }
-
-    return result;
-  }
-
-  async function refresh(id, list, bounds, depth, current = 0) {
-    const selected = [];
-
-    await Promise.all(
-      list.map(async (elm) => {
-        const elements = await this.process(elm);
-
-        elements.forEach((elm) => {
-          if (!this.space.overlap(bounds[current], elm._bounds).overlap) return;
-          selected.push(elm);
-        });
-      })
-    );
-
-    let total = 0;
-    list.forEach((elm) => {
-      if (!elm._items) total++;
-    });
-
-    this.monitoring.send(
-      new Monitoring(current, State.Refresh, {
-        id: id,
-        depth: current,
-        bounds: bounds[current],
-        size: total,
-      })
-    );
-
-    if (id === this.current.id) {
-      if (current < depth) {
-        await this.refresh(id, selected, bounds, depth, current + 1);
-      } else {
-        this.finish(id);
-      }
-    }
-  }
-
-  async function process$1(element) {
-    const collection = element._collection;
-    const hash = element._hash;
-    const key = `${collection}-${hash}`;
-
-    if (this.cache.has(key)) return this.cache.get(key);
-
-    let set = element._items;
-
-    if (!set) {
-      try {
-        set = await this.network.getSet(collection, hash);
-      } catch (error) {
-        console.error(`Error processing element ${element}:`, error);
-      }
-    }
-
-    const length = hash === ROOT ? 0 : hash.length;
-    const elements = [];
-    const merged = {};
-
-    set.forEach((elm) => {
-      if (elm instanceof Item$1) {
-        this.consolidate(merged, length + 1, elm);
-        return;
-      }
-
-      elm._bounds = this.space.decode(elm._hash);
-      elm._xyz = this.space.xyz(elm._hash);
-
-      elements.push(elm);
-    });
-
-    Object.values(merged).forEach((elm) => {
-      elements.push(elm);
-    });
-
-    this.cache.set(key, elements);
-    this.stream(elements);
-
-    return elements;
-  }
-
-  function consolidate(merged, length, elm) {
-    const hash = elm._hash.substring(0, length);
-    const set = merged[hash];
-
-    if (!set) {
-      const n = new Set$1(elm._collection, hash, 1, elm._metrics);
-
-      n._bounds = this.space.decode(n._hash);
-      n._xyz = this.space.xyz(n._hash);
-      n._items = [elm];
-
-      merged[hash] = n;
-      return;
-    }
-
-    set._count++;
-    set._items.push(elm);
-    set._metrics = set._metrics.map(
-      (metric, index) => metric + elm._metrics[index]
-    );
-  }
-
-  class Grid {
-    constructor(collection, space, options, stream, finish, monitoring, network) {
-      this.collection = collection;
-      this.space = space;
-      this.options = options;
-      this.stream = stream;
-      this.finish = finish;
-      this.monitoring = monitoring;
-      this.network = network;
-
-      this.current = {};
-      this.cache = new Map();
-      this.root = new Set$1(collection, "@", undefined, undefined);
-    }
-
-    async move(zoom, bounds) {
-      const depth = Math.floor(
-        (zoom + this.options.resolution + this.options.offset.zoom) /
-          this.space.step
-      );
-      const hash = this.space.encode(this.space.center(bounds), depth);
-
-      if (this.current.hash === hash) return;
-
-      const id = crypto.randomUUID();
-      this.current = { hash, id };
-
-      this.refresh(id, [this.root], this.project(zoom, bounds), depth);
-    }
-  }
-
-  Grid.prototype.project = project;
-  Grid.prototype.refresh = refresh;
-  Grid.prototype.process = process$1;
-  Grid.prototype.consolidate = consolidate;
 
   class Peer extends Peer$1 {
     /**
@@ -2800,9 +4507,8 @@
      * @param {Object.<string, null>} ips - An object containing the peer's IP addresses.
      * @param {number} port - The port number the peer is listening on.
      * @param {string} ip - The primary IP address of the peer.
-     * @param {boolean} [clientReady=true] - Whether clients may XOR-route writes here.
      */
-    constructor(hash, ips, port, ip, clientReady = true) {
+    constructor(hash, ips, port, ip) {
       super();
 
       this._id = decodeUrl64(hash);
@@ -2810,7 +4516,6 @@
       this._ips = ips;
       this._port = port;
       this._ip = ip;
-      this._clientReady = clientReady !== false;
     }
 
     /**
@@ -2851,20 +4556,6 @@
      */
     ip() {
       return this._ip;
-    }
-
-    /**
-     * Whether this peer is safe for client XOR write routing.
-     * Joining (spawned) nodes advertise false until ownership is mirrored.
-     * @returns {boolean}
-     */
-    clientReady() {
-      return this._clientReady !== false;
-    }
-
-    /** @param {boolean} ready */
-    setClientReady(ready) {
-      this._clientReady = !!ready;
     }
   }
 
@@ -2913,6 +4604,18 @@
         throw new Error("id must be a Uint8Array");
       }
       return this._bst.remove(0, id);
+    }
+
+    /**
+     * @returns {Peer[]} peers currently in the routing table
+     */
+    peers() {
+      const out = [];
+      const buf = new Uint8Array(64);
+      this._bst.traverse(0, buf, (_idx, _id, peer) => {
+        if (peer instanceof Peer) out.push(peer);
+      });
+      return out;
     }
   }
 
@@ -2994,7 +4697,464 @@
     }
   }
 
+  /**
+   * Single-item rows use either `childHash:itemReference` or a bare hash segment
+   * (Go shrink / leaf entries). Only the colon form existed historically in JS.
+   */
+  function itemKeyParts(key) {
+    if (typeof key !== "string" || key.length === 0) {
+      return null;
+    }
+    const i = key.indexOf(":");
+    if (i <= 0) {
+      return { hash: key, reference: key };
+    }
+    const hash = key.slice(0, i);
+    const reference = key.slice(i + 1);
+    if (!reference) {
+      return { hash, reference: hash };
+    }
+    return { hash, reference };
+  }
+
+  /**
+   * @param {Object<string, { count: number, metrics?: number[] }>} setData
+   * @param {string} collection
+   * @returns {Array<Item|Set>}
+   */
+  function parseSetMap(setData, collection) {
+    if (!setData || typeof setData !== "object") {
+      return [];
+    }
+    const elements = [];
+    for (const [key, value] of Object.entries(setData)) {
+      if (!value || typeof value.count !== "number") {
+        continue;
+      }
+      if (value.count === 1) {
+        const parts = itemKeyParts(key);
+        if (!parts) {
+          continue;
+        }
+        elements.push(
+          new Item$1(collection, parts.hash, value.metrics, parts.reference)
+        );
+      } else {
+        elements.push(new Set$1(collection, key, value.count, value.metrics));
+      }
+    }
+    return elements;
+  }
+
+  /**
+   * Binary encoder for GET /sets (go-indexus-core domain.Collection.GetMultiple).
+   *
+   * Stream = concatenated blocks (multi-owner responses are concatenated too).
+   * Each non-empty depth bucket:
+   *   - u8 depthIndex           // keys have byte length depthIndex + 1
+   *   - u32 BE entry count `size`
+   *   - `propertyCount` × u8    // bits.Len(max) per packed column (may be 0)
+   *   - `size * (depthIndex+1)` key bytes (UTF-8; typically ASCII hashes)
+   *   - For each property j: ceil(size * bitCounts[j] / 8) bytes — packed ints MSB-first
+   *
+   * Server strips `:reference` from keys using the colon (not a fixed prefix length).
+   * Packed ints match Go encodeBits / sequential MSB bitstream (same order as metrics columns).
+   */
+
+  /** Matches http/p2p/p2p.go GetMultiple defaults. */
+  const SETS_BINARY_PROPERTY_COUNT = 4;
+
+  /** Inverse of metricInt scaling in go-indexus-core/http/p2p/p2p.go */
+  const DEFAULT_SETS_METRIC_DECODE = [
+    { propIndex: 1, metricIndex: 2, divisor: 1 },
+    { propIndex: 2, metricIndex: 3, divisor: 1_000_000 },
+    { propIndex: 3, metricIndex: 4, divisor: 1_000_000 },
+  ];
+
+  function readU32BE$1(u8, offset) {
+    return (
+      (u8[offset] << 24) |
+      (u8[offset + 1] << 16) |
+      (u8[offset + 2] << 8) |
+      u8[offset + 3]
+    ) >>> 0;
+  }
+
+  /**
+   * Decode `count` unsigned integers packed `bitsPerValue` wide (MSB-first), Go encodeBits order.
+   */
+  function decodePackedInts(u8, offset, count, bitsPerValue) {
+    if (bitsPerValue <= 0) {
+      return { values: new Array(count).fill(0), bytesConsumed: 0 };
+    }
+    const values = new Array(count);
+    let bitPos = 0;
+    const totalBits = count * bitsPerValue;
+    const bytesConsumed = Math.ceil(totalBits / 8);
+
+    if (offset + bytesConsumed > u8.length) {
+      throw new Error(
+        `decodePackedInts: need ${bytesConsumed} bytes at offset ${offset}, len=${u8.length}`
+      );
+    }
+
+    for (let i = 0; i < count; i++) {
+      let v = 0n;
+      for (let b = 0; b < bitsPerValue; b++) {
+        const globalBit = bitPos;
+        bitPos++;
+        const byteIdx = offset + (globalBit >> 3);
+        const bitInByte = globalBit & 7;
+        const bit = (u8[byteIdx] >> (7 - bitInByte)) & 1;
+        v = (v << 1n) | BigInt(bit);
+      }
+      values[i] = Number(v);
+    }
+
+    return { values, bytesConsumed };
+  }
+
+  /**
+   * @param {ArrayBuffer | Uint8Array} buffer
+   * @param {{ propertyCount?: number }} options
+   */
+  function decodeSetsBinary(buffer, options = {}) {
+    const u8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    const propertyCount =
+      Number(options.propertyCount) > 0
+        ? Math.floor(Number(options.propertyCount))
+        : SETS_BINARY_PROPERTY_COUNT;
+
+    const blocks = [];
+    let offset = 0;
+    const decoder = new TextDecoder("utf-8");
+
+    while (offset < u8.length) {
+      const depthIndex = u8[offset++];
+      if (offset + 4 > u8.length) {
+        throw new Error("decodeSetsBinary: truncated header (size)");
+      }
+      const size = readU32BE$1(u8, offset);
+      offset += 4;
+
+      if (offset + propertyCount > u8.length) {
+        throw new Error("decodeSetsBinary: truncated header (bitCounts)");
+      }
+      const bitCounts = [];
+      for (let j = 0; j < propertyCount; j++) {
+        bitCounts.push(u8[offset++]);
+      }
+
+      const keyLen = depthIndex + 1;
+      const keysTotalBytes = size * keyLen;
+      if (offset + keysTotalBytes > u8.length) {
+        throw new Error("decodeSetsBinary: truncated keys segment");
+      }
+
+      const keys = [];
+      for (let i = 0; i < size; i++) {
+        const start = offset + i * keyLen;
+        keys.push(decoder.decode(u8.subarray(start, start + keyLen)));
+      }
+      offset += keysTotalBytes;
+
+      const columns = [];
+      for (let j = 0; j < propertyCount; j++) {
+        const { values, bytesConsumed } = decodePackedInts(
+          u8,
+          offset,
+          size,
+          bitCounts[j]
+        );
+        columns.push(values);
+        offset += bytesConsumed;
+      }
+
+      blocks.push({
+        depthIndex,
+        size,
+        keys,
+        columns,
+        bitCounts,
+      });
+    }
+
+    return { blocks, propertyCount };
+  }
+
+  function buildMetricsRow(columns, rowIndex, decodeRules = DEFAULT_SETS_METRIC_DECODE) {
+    const metrics = [];
+    for (let r = 0; r < decodeRules.length; r++) {
+      const rule = decodeRules[r];
+      const raw = columns[rule.propIndex]?.[rowIndex];
+      const num = Number.isFinite(raw) ? raw : 0;
+      metrics[rule.metricIndex] = rule.divisor === 1 ? num : num / rule.divisor;
+    }
+    return metrics;
+  }
+
+  /**
+   * Same Abelian-shaped map as JSON `/set` payloads (`{ count, metrics }`), keyed like GetMultiple output.
+   *
+   * Rows are not unique per key. The server strips `:reference` and truncates
+   * each key to its `precision` (6), so every item deeper than that arrives as a
+   * key naming the cell it falls in, and distinct items share one. Indexing the
+   * rows by key therefore has to fold them: assigning would keep whichever row
+   * happened to come last and silently drop the rest of the cell's mass.
+   *
+   * @param {{ folded: number }} [stats] - out-param: rows absorbed into an
+   *   existing key. Non-zero means the payload was denser than its key space.
+   */
+  function binaryBlocksToRawMap(blocks, decodeRules = DEFAULT_SETS_METRIC_DECODE, stats = null) {
+    const shaped = {};
+    let folded = 0;
+    for (let b = 0; b < blocks.length; b++) {
+      const block = blocks[b];
+      const { size, keys, columns } = block;
+      const counts = columns[0];
+      if (!counts || counts.length !== size) continue;
+
+      for (let i = 0; i < size; i++) {
+        const key = keys[i];
+        const metrics = buildMetricsRow(columns, i, decodeRules);
+        const existing = shaped[key];
+        if (!existing) {
+          shaped[key] = { count: counts[i], metrics };
+          continue;
+        }
+        folded++;
+        existing.count += counts[i];
+        for (let m = 0; m < metrics.length; m++) {
+          if (metrics[m] === undefined) continue;
+          existing.metrics[m] = (existing.metrics[m] ?? 0) + metrics[m];
+        }
+      }
+    }
+    if (stats) stats.folded = folded;
+    return shaped;
+  }
+
+  /**
+   * Turns decoded blocks into the same `{ hash: { count, metrics } }` shape as JSON /set,
+   * then reuses parseSetMap for Item vs Set constructor parity.
+   */
+  function binaryBlocksToElements(collection, blocks, decodeRules = DEFAULT_SETS_METRIC_DECODE, stats = null) {
+    return parseSetMap(binaryBlocksToRawMap(blocks, decodeRules, stats), collection);
+  }
+
+  /**
+   * Splits a merged /sets payload into per-parent buckets using longest-prefix match.
+   * Skip falsy parents (e.g. avoid assigning everything under "").
+   *
+   * Root (`@`) is special: child hashes are bare prefixes (`7`, `a`, …) and do
+   * **not** start with `@`. Always match non-root parents first (longest prefix),
+   * then fall back to `@` for anything still unclaimed.
+   */
+  function distributeElementsByParent(parentLocations, elements) {
+    const uniq = [...new Set(parentLocations)].filter(Boolean);
+    const nonRoot = uniq
+      .filter((p) => p !== "@")
+      .sort((a, b) => b.length - a.length);
+    const hasRoot = uniq.includes("@");
+    /** @type {Map<string, Array<Item|Set>>} */
+    const map = new Map();
+    for (let i = 0; i < uniq.length; i++) {
+      map.set(uniq[i], []);
+    }
+
+    for (let e = 0; e < elements.length; e++) {
+      const el = elements[e];
+      const h = el.hash();
+      if (!h || h === "@") continue;
+
+      let assigned = false;
+      for (let p = 0; p < nonRoot.length; p++) {
+        const parent = nonRoot[p];
+        if (h.length > parent.length && h.startsWith(parent)) {
+          map.get(parent).push(el);
+          assigned = true;
+          break;
+        }
+      }
+      if (!assigned && hasRoot) {
+        map.get("@").push(el);
+      }
+    }
+
+    return map;
+  }
+
+  /**
+   * Coalesces concurrent {@code getSets} calls per collection inside one microtask,
+   * merges location keys into minimal HTTP payloads, splits oversized unions into chunks,
+   * and runs chunks in bounded parallel waves.
+   */
+
+  const NativeSet = globalThis.Set;
+
+  function chunkArray(arr, chunkSize) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += chunkSize) {
+      out.push(arr.slice(i, i + chunkSize));
+    }
+    return out;
+  }
+
+  class SetsCoalescePool {
+    /**
+     * @param {{
+     *   maxChunkSize?: number,
+     *   maxParallelChunks?: number,
+     *   fetchChunk: (collection: string, locations: string[], refresh: boolean) => Promise<void>,
+     *   finalizeWaiter: (
+     *     collection: string,
+     *     waiter: { partialPrefix: Map<string, unknown>, uniqInput: string[] }
+     *   ) => Map<string, unknown>,
+     * }} options
+     */
+    constructor(options = {}) {
+      const maxChunk =
+        Number(options.maxChunkSize) > 0 ? Math.floor(options.maxChunkSize) : 96;
+      const maxParallel =
+        Number(options.maxParallelChunks) > 0
+          ? Math.floor(options.maxParallelChunks)
+          : 16;
+
+      // Chunk size 1 is intentional for method=getSet (one-location batches).
+      this.maxChunkSize = Math.max(1, maxChunk);
+      this.maxParallelChunks = Math.max(1, maxParallel);
+      this.fetchChunk = options.fetchChunk;
+      this.finalizeWaiter = options.finalizeWaiter;
+
+      if (typeof this.fetchChunk !== "function") {
+        throw new Error("SetsCoalescePool requires fetchChunk");
+      }
+      if (typeof this.finalizeWaiter !== "function") {
+        throw new Error("SetsCoalescePool requires finalizeWaiter");
+      }
+
+      /** @type {Map<string, { union: InstanceType<typeof NativeSet>, waiters: WaiterEntry[] }>} */
+      this._pending = new Map();
+      this._flushScheduled = false;
+    }
+
+    /**
+     * @param {string} collection
+     * @param {Map<string, unknown>} partialPrefix locations already resolved (cache hits)
+     * @param {string[]} uniqInput caller key order / membership
+     * @param {string[]} missingArray locations still needing network (subset of uniqInput)
+     * @param {boolean} [refresh] one refreshing caller upgrades the whole wave:
+     *   the union is fetched once, and a fresher answer is never wrong for the
+     *   callers that did not ask for it.
+     * @returns {Promise<Map<string, unknown>>}
+     */
+    submit(collection, partialPrefix, uniqInput, missingArray, refresh = false) {
+      return new Promise((resolve, reject) => {
+        let slot = this._pending.get(collection);
+        if (!slot) {
+          slot = { union: new NativeSet(), waiters: [], refresh: false };
+          this._pending.set(collection, slot);
+        }
+        if (refresh) slot.refresh = true;
+        const missingList = Array.isArray(missingArray) ? missingArray : [];
+        for (let i = 0; i < missingList.length; i++) {
+          slot.union.add(missingList[i]);
+        }
+
+        slot.waiters.push({
+          partialPrefix,
+          uniqInput,
+          resolve,
+          reject,
+        });
+
+        this._scheduleFlush();
+      });
+    }
+
+    _scheduleFlush() {
+      if (this._flushScheduled) return;
+      this._flushScheduled = true;
+      queueMicrotask(() => {
+        void this._flushAll();
+      });
+    }
+
+    async _flushAll() {
+      const snapshot = new Map(this._pending);
+      this._pending.clear();
+      this._flushScheduled = false;
+
+      if (snapshot.size === 0) {
+        if (this._pending.size > 0) {
+          this._scheduleFlush();
+        }
+        return;
+      }
+
+      try {
+        await Promise.all(
+          [...snapshot.entries()].map(([collection, bucket]) =>
+            this._flushCollection(collection, bucket)
+          )
+        );
+      } finally {
+        if (this._pending.size > 0) {
+          this._scheduleFlush();
+        }
+      }
+    }
+
+    /**
+     * @param {string} collection
+     * @param {{ union: InstanceType<typeof NativeSet>, waiters: WaiterEntry[], refresh?: boolean }} bucket
+     */
+    async _flushCollection(collection, bucket) {
+      try {
+        const unionList = [...bucket.union];
+        unionList.sort();
+
+        const chunks = chunkArray(unionList, this.maxChunkSize);
+
+        for (let i = 0; i < chunks.length; i += this.maxParallelChunks) {
+          const wave = chunks.slice(i, i + this.maxParallelChunks);
+          await Promise.all(
+            wave.map((locations) =>
+              this.fetchChunk(collection, locations, bucket.refresh === true)
+            )
+          );
+        }
+
+        for (let w = 0; w < bucket.waiters.length; w++) {
+          const waiter = bucket.waiters[w];
+          try {
+            waiter.resolve(this.finalizeWaiter(collection, waiter));
+          } catch (err) {
+            waiter.reject(err);
+          }
+        }
+      } catch (err) {
+        for (let w = 0; w < bucket.waiters.length; w++) {
+          bucket.waiters[w].reject(err);
+        }
+      }
+    }
+  }
+
+  /** @typedef {{ partialPrefix: Map<string, unknown>, uniqInput: string[], resolve: Function, reject: Function }} WaiterEntry */
+
   // Network.js
+
+  /** @typedef {"ingress" | "direct"} ReadNavigation */
+  /** @typedef {"getSet" | "getSets"} ReadMethod */
+
+  function normalizeNavigation(value) {
+    return value === "direct" ? "direct" : "ingress";
+  }
+
+  function normalizeMethod(value) {
+    return value === "getSet" ? "getSet" : "getSets";
+  }
 
   function randomRoutingKey(byteLength = 16) {
     const bytes = new Uint8Array(byteLength);
@@ -3004,6 +5164,31 @@
       for (let i = 0; i < byteLength; i++) bytes[i] = Math.floor(Math.random() * 256);
     }
     return bytes;
+  }
+
+  function now() {
+    return typeof performance !== "undefined" && performance.now
+      ? performance.now()
+      : Date.now();
+  }
+
+  // Shared bit prefix length — the ordering Table#nearest walks, so it tells
+  // whether a hinted peer is really closer in our own view of the mesh.
+  function commonPrefixBits(a, b) {
+    const len = Math.min(a.length, b.length);
+    let bits = 0;
+    for (let i = 0; i < len; i++) {
+      const diff = a[i] ^ b[i];
+      if (diff === 0) {
+        bits += 8;
+        continue;
+      }
+      for (let bit = 7; bit >= 0; bit--) {
+        if ((diff >> bit) & 1) return bits;
+        bits++;
+      }
+    }
+    return bits;
   }
 
   /**
@@ -3019,8 +5204,22 @@
      * @param {string[]} hosts - An array of bootstrap hosts to initialize the network.
      * @param {number} concurrency - The maximum number of concurrent network calls.
      * @param {number} cacheSize - The maximum number of sets to keep in the cache.
+     * @param {{
+     *   setsMaxChunkSize?: number,
+     *   setsMaxParallelChunks?: number,
+     *   navigation?: ReadNavigation,
+     *   method?: ReadMethod,
+     *   refreshTtlMs?: number,
+     * }} [setsPoolOptions] - tuning for merged `/sets` batching and shared read modes.
      */
-    constructor(protocol, api, hosts, concurrency = 50, cacheSize = 1000) {
+    constructor(
+      protocol,
+      api,
+      hosts,
+      concurrency = 50,
+      cacheSize = 1000,
+      setsPoolOptions = {}
+    ) {
       super();
 
       this._protocol = protocol;
@@ -3034,16 +5233,230 @@
       // Initialize the throttler with the specified concurrency limit
       this._throttler = new Throttler(this._concurrency);
 
+      // Session seed: the XOR-nearest peer is the read ingress, and every read
+      // goes through getSets → ingressPeer(), so a session stays on one node.
+      this._routingKey = randomRoutingKey(16);
+
+      // Hinted peers unreachable from this client. Without it the server keeps
+      // re-advertising them and the ingress flaps across the whole mesh.
+      this._hintRejected = new Set();
+
       // Initialize the cache with a maximum size
       this._cache = new Map();
       this._cacheSize = cacheSize;
+      /** zone key → wall clock of the answer that filled `_cache`. */
+      this._cacheFetchedAt = new Map();
+      /** zone key → the read wave currently on the wire for that zone. */
+      this._inflight = new Map();
 
-      // Client identity in the XOR space — used as /neighbors origin and as
-      // first-hop for reads (path-fill / cache). Writes target the item key.
-      this._routingKey = randomRoutingKey(16);
+      const poolCfg =
+        setsPoolOptions && typeof setsPoolOptions === "object" ? setsPoolOptions : {};
 
-      // Initialize the network by searching for peers (await via whenReady / getSet).
+      // A zone re-read within this window is served from cache even when the
+      // caller asks for `refresh`. The Aggregate repair pass walks the whole
+      // visible tree every time it runs, and without a floor those passes chain
+      // into a permanent `/sets` storm.
+      this._refreshTtlMs =
+        Number.isFinite(poolCfg.refreshTtlMs) && poolCfg.refreshTtlMs >= 0
+          ? Math.floor(poolCfg.refreshTtlMs)
+          : 5000;
+
+      this._readNavigation = normalizeNavigation(poolCfg.navigation);
+      this._readMethod = normalizeMethod(poolCfg.method);
+      this._setsPoolCfg = {
+        setsMaxChunkSize:
+          Number(poolCfg.setsMaxChunkSize) > 0
+            ? Math.floor(poolCfg.setsMaxChunkSize)
+            : 96,
+        setsMaxParallelChunks:
+          Number(poolCfg.setsMaxParallelChunks) > 0
+            ? Math.floor(poolCfg.setsMaxParallelChunks)
+            : Math.min(this._concurrency, 16),
+      };
+      this._setsPool = this._makeSetsPool();
+
+      /** @type {null | ((ev: object) => void)} */
+      this._onActivity = null;
+      /** @type {null | ((peers: object[]) => void)} */
+      this._onPeers = null;
+
+      // Initialize the network by searching for peers (await via whenReady / getSets).
       this._ready = this.discoverPeers();
+    }
+
+    _makeSetsPool() {
+      const chunkSize =
+        this._readMethod === "getSet" ? 1 : this._setsPoolCfg.setsMaxChunkSize;
+      return new SetsCoalescePool({
+        maxChunkSize: chunkSize,
+        maxParallelChunks: this._setsPoolCfg.setsMaxParallelChunks,
+        fetchChunk: (coll, locs, refresh) =>
+          this._fetchSetsChunk(coll, locs, refresh),
+        finalizeWaiter: (coll, waiter) => this._finalizeSetsWaiter(coll, waiter),
+      });
+    }
+
+    /**
+     * Shared Nearby/Aggregate read configuration.
+     * @returns {{ navigation: ReadNavigation, method: ReadMethod }}
+     */
+    readOptions() {
+      return {
+        navigation: this._readNavigation,
+        method: this._readMethod,
+      };
+    }
+
+    /**
+     * Update shared read modes. Clears the `/sets` cache so ingress and direct
+     * answers never mix in one session.
+     * @param {{ navigation?: ReadNavigation, method?: ReadMethod }} options
+     */
+    setReadOptions(options = {}) {
+      const nextNav = normalizeNavigation(
+        options.navigation !== undefined ? options.navigation : this._readNavigation
+      );
+      const nextMethod = normalizeMethod(
+        options.method !== undefined ? options.method : this._readMethod
+      );
+      if (nextNav === this._readNavigation && nextMethod === this._readMethod) {
+        return;
+      }
+      this._readNavigation = nextNav;
+      this._readMethod = nextMethod;
+      this._cache.clear();
+      this._cacheFetchedAt.clear();
+      this._inflight.clear();
+      this._setsPool = this._makeSetsPool();
+    }
+
+    setActivityHandler(handler) {
+      this._onActivity = typeof handler === "function" ? handler : null;
+    }
+
+    setPeersHandler(handler) {
+      this._onPeers = typeof handler === "function" ? handler : null;
+    }
+
+    // Session seed in the same base64url alphabet as peer hashes, so the UI can
+    // compare it with the ingress node name.
+    routingKeyHash() {
+      return encodeUrl64(this._routingKey);
+    }
+
+    ingressPeer() {
+      return this._table.nearest(this._routingKey);
+    }
+
+    /**
+     * @returns {{ hash: string, ip: string, port: number, host: string, ingress: boolean }[]}
+     */
+    listPeers() {
+      const peers = this._table.peers();
+      const ingress = this.ingressPeer();
+      const ingressHash = ingress ? ingress.hash() : null;
+      const out = [];
+      for (let i = 0; i < peers.length; i++) {
+        const p = peers[i];
+        const hash = p.hash();
+        out.push({
+          hash,
+          ip: p.ip(),
+          port: p.port(),
+          host: `${p.ip()}|${p.port()}`,
+          ingress: ingressHash != null && hash === ingressHash,
+        });
+      }
+      return out;
+    }
+
+    _notifyPeers() {
+      if (typeof this._onPeers !== "function") return;
+      try {
+        this._onPeers(this.listPeers());
+      } catch {
+        /* ignore UI bridge errors */
+      }
+    }
+
+    // Opportunistic ingress from `/sets` response headers, so a client follows
+    // mesh growth without discovery pings. Only strictly closer peers are
+    // adopted: the server ranks against its own table, and trusting it blindly
+    // would bounce the ingress back and forth.
+    _adoptIngressHint(hint) {
+      if (!hint || !hint.name || !hint.ip || !(hint.port > 0)) return;
+      if (this._hintRejected.has(hint.name)) return;
+
+      const current = this.ingressPeer();
+      if (current && current.hash() === hint.name) return;
+
+      try {
+        const next = new Peer(hint.name, { [hint.ip]: null }, hint.port, hint.ip);
+        if (current) {
+          const currentBits = commonPrefixBits(current.id(), this._routingKey);
+          const nextBits = commonPrefixBits(next.id(), this._routingKey);
+          if (nextBits <= currentBits) return;
+        }
+        this._table.insert(next.id(), next);
+        this._notifyPeers();
+      } catch {
+        /* ignore malformed hint */
+      }
+    }
+
+    /**
+     * @param {"start"|"end"} phase
+     * @param {import("./peer.js").Peer | null} peer
+     * @param {{ method: string, ok?: boolean, ms?: number, collection?: string, location?: string }} meta
+     */
+    _emitActivity(phase, peer, meta) {
+      if (typeof this._onActivity !== "function") return;
+      try {
+        const ip = meta.ip ?? (peer ? peer.ip() : null);
+        const port = meta.port ?? (peer ? peer.port() : null);
+        const hash = meta.hash ?? (peer ? peer.hash() : null);
+        this._onActivity({
+          phase,
+          method: meta.method,
+          hash,
+          ip,
+          port,
+          host: meta.host ?? (ip != null ? `${ip}|${port}` : null),
+          ok: meta.ok,
+          ms: meta.ms,
+          collection: meta.collection,
+          location: meta.location,
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+
+    /**
+     * @template T
+     * @param {import("./peer.js").Peer} peer
+     * @param {string} method
+     * @param {() => Promise<T>} fn
+     * @param {{ collection?: string, location?: string }} [meta]
+     * @returns {Promise<T>}
+     */
+    async _withActivity(peer, method, fn, meta = {}) {
+      const started = now();
+      this._emitActivity("start", peer, { method, ...meta });
+      try {
+        const result = await fn();
+        const ms = now() - started;
+        this._emitActivity("end", peer, { method, ok: true, ms, ...meta });
+        return result;
+      } catch (error) {
+        this._emitActivity("end", peer, {
+          method,
+          ok: false,
+          ms: now() - started,
+          ...meta,
+        });
+        throw error;
+      }
     }
 
     /**
@@ -3058,186 +5471,107 @@
       return this._concurrency;
     }
 
-    /** @returns {Uint8Array} session routing key used for ingress peer selection */
-    routingKey() {
-      return this._routingKey;
+    /**
+     * Ping one bootstrap host. The contact is only known once the ping answers,
+     * so the activity pair is emitted here rather than through _withActivity.
+     * @param {string} host - `ip|port`
+     * @returns {Promise<import("./peer.js").Peer | null>} null when unreachable
+     */
+    async _pingHost(host) {
+      const [ip, port] = host.split("|");
+      const meta = { method: "pingPeer", host, ip, port: Number(port) };
+      const started = now();
+
+      this._emitActivity("start", null, meta);
+      try {
+        const peer = await this._api.pingPeer(this._protocol, ip, port);
+        this._emitActivity("end", peer, { ...meta, ok: true, ms: now() - started });
+        return peer;
+      } catch {
+        this._emitActivity("end", null, { ...meta, ok: false, ms: now() - started });
+        console.warn(`Failed to add bootstrap peer with host ${host}.`);
+        return null;
+      }
     }
 
     /**
      * Initializes the network by searching for peers and populating the routing table.
-     * Bootstraps are pinged, then each is asked for neighbors of this client's key
-     * so the table is not stuck on a single entry point.
      */
     async discoverPeers() {
-      try {
-        const bootstraps = [];
+      const pings = this._hosts.map((host) =>
+        this._throttler.enqueue(`pingPeer:${host}`, () => this._pingHost(host))
+      );
+      const peers = (await Promise.all(pings)).filter(Boolean);
 
-        const tasks = this._hosts.map((host) =>
-          this._throttler.enqueue(`pingPeer:${host}`, async () => {
-            try {
-              const [ip, port] = host.split("|");
-              const peer = await this._api.pingPeer(this._protocol, ip, port);
-              // Bootstrap seeds stay in the table even while joining so discovery
-              // has an entry point; writes still skip clientReady=false hops.
-              bootstraps.push(peer);
-            } catch (error) {
-              console.warn(`Failed to add bootstrap peer with host ${host}.`);
-            }
-          })
-        );
-
-        await Promise.all(tasks);
-
-        if (bootstraps.length === 0) {
-          throw new Error("Failed to find peers with bootstrap hosts.");
-        }
-        bootstraps.forEach((peer) => {
-          if (peer.clientReady && peer.clientReady() === false) {
-            // Keep seed reachable for rediscovery, but not as a write hop.
-            this._joining = this._joining || new Map();
-            this._joining.set(peer.hash(), peer);
-            return;
-          }
-          this._table.insert(peer.id(), peer);
-        });
-
-        const origin = encodeUrl64(this._routingKey);
-        const expand = bootstraps.map((peer) =>
-          this._throttler.enqueue(`neighbors:${peer.hash()}`, async () => {
-            try {
-              if (typeof this._api.getNeighbors !== "function") return;
-              const neighbors = await this._api.getNeighbors(
-                this._protocol,
-                peer,
-                origin
-              );
-              for (const n of neighbors) {
-                // Neighbors do not carry client_ready — ping before advertising
-                // as a write hop so joining spawned nodes stay invisible.
-                try {
-                  const live = await this._api.pingPeer(
-                    this._protocol,
-                    n.ip(),
-                    n.port()
-                  );
-                  if (live.clientReady && live.clientReady() === false) {
-                    this._joining = this._joining || new Map();
-                    this._joining.set(live.hash(), live);
-                    continue;
-                  }
-                  this._table.insert(live.id(), live);
-                } catch {
-                  // Unreachable neighbour — skip.
-                }
-              }
-            } catch (error) {
-              // Neighbor expansion is best-effort; bootstrap alone still works.
-            }
-          })
-        );
-        await Promise.all(expand);
-
-        // Promote peers that finished mirroring since last discover.
-        if (this._joining && this._joining.size) {
-          for (const [hash, peer] of [...this._joining]) {
-            try {
-              const live = await this._api.pingPeer(
-                this._protocol,
-                peer.ip(),
-                peer.port()
-              );
-              if (!live.clientReady || live.clientReady() !== false) {
-                this._table.insert(live.id(), live);
-                this._joining.delete(hash);
-              }
-            } catch {
-              // Still booting or gone.
-            }
-          }
-        }
-      } catch (error) {
-        console.error("Error initializing peers:", error);
+      if (peers.length === 0) {
+        console.error("Error initializing peers: no bootstrap host answered.");
+        return;
       }
-    }
 
-    /**
-     * First hop for a write: peer whose id is closest to transform(collection, location).
-     * Keys are effectively random in XOR space, so load spreads across the mesh.
-     * Peers still joining (client_ready=false) are never selected.
-     */
-    _writePeer(collection, location, tried) {
-      const key = transform(collection, location);
-      let peer = this._table.nearest(key);
-      if (peer && (tried.has(peer.hash()) || (peer.clientReady && peer.clientReady() === false))) {
-        peer = null;
-      }
-      // Fallback: any other known peer near the session key (still not sticky
-      // to bootstrap unless it is the only contact).
-      if (!peer) {
-        peer = this._table.nearest(this._routingKey);
-        if (peer && (tried.has(peer.hash()) || (peer.clientReady && peer.clientReady() === false))) {
-          peer = null;
-        }
-      }
-      return peer;
+      peers.forEach((peer) => this._table.insert(peer.id(), peer));
+      this._notifyPeers();
     }
 
     /**
      * Adds an item to a collection at a specific location in the network.
-     * Ingress targets the peer nearest the item key, not a fixed bootstrap.
+     * If the operation fails, it retries with a different peer.
+     * @param {string} collection - The name of the collection.
+     * @param {string} root - The targeted root set.
+     * @param {string} location - The location identifier within the collection.
+     * @param {number[]} metrics - The metrics of the item to add.
+     * @param {string} reference - The unique identifier of the item to add.
+     * @returns {Promise<void>}
      */
     async addItem(collection, root, location, metrics, reference) {
       let attempts = this._attempts;
-      const tried = new Set();
+
+      const id = zoneKeyID(collection, location);
 
       while (true) {
-        let peer = this._writePeer(collection, location, tried);
+        await this.whenReady();
+
+        // A write goes to the peer nearest the zone, not to the read ingress.
+        let peer = this._table.nearest(id);
 
         if (!peer) {
           await this.discoverPeers();
-          peer = this._writePeer(collection, location, tried);
+          peer = this._table.nearest(id);
         }
 
         if (!peer) {
-          throw new Error("No peers available for write ingress.");
+          throw new Error("Failed to find peers with bootstrap hosts.");
         }
-        tried.add(peer.hash());
 
         try {
+          // Generate a unique key for addItem
           const addItemKey = `addItem:${collection}:${root}:${location}:${reference}`;
 
+          // Wrap the addItem API call with the throttler's enqueue method
           await this._throttler.enqueue(addItemKey, () =>
-            this._api.addItem(
-              this._protocol,
-              peer,
-              collection,
-              root,
-              location,
-              metrics,
-              reference
+            this._withActivity(peer, "addItem", () =>
+              this._api.addItem(
+                this._protocol,
+                peer,
+                collection,
+                root,
+                location,
+                metrics,
+                reference
+              ),
+              { collection, location }
             )
           );
           return;
         } catch (error) {
-          const msg = String(error?.message || error || "");
-          // Joining nodes refuse with ErrJoining — park them for rediscovery
-          // instead of dropping the contact (they become routable after publish).
-          if (/joining ownership|still joining/i.test(msg)) {
-            if (typeof peer.setClientReady === "function") {
-              peer.setClientReady(false);
-            }
-            this._joining = this._joining || new Map();
-            this._joining.set(peer.hash(), peer);
-            this._table.remove(peer.id());
-          } else {
-            this._table.remove(peer.id());
-          }
+          // If the request fails, remove the peer from the table and retry
+          this._table.remove(peer.id());
           console.warn(
             `Failed to add item via peer ${peer.hash()}. Retrying with a different peer...`
           );
 
           attempts--;
           if (attempts === 0) {
+            // If all attempts fail, throw an error
             throw new Error("Failed to add item after multiple attempts.");
           }
         }
@@ -3246,47 +5580,52 @@
 
     /**
      * Deletes an item from a collection at a specific location in the network.
-     * Same ingress as addItem: peer nearest the item key.
+     * Same write ingress as {@link addItem}: peer nearest the zone key.
+     * @param {string} collection
+     * @param {string} root
+     * @param {string} location
+     * @param {string} reference
+     * @returns {Promise<void>}
      */
     async deleteItem(collection, root, location, reference) {
       let attempts = this._attempts;
-      const tried = new Set();
+      const id = zoneKeyID(collection, location);
 
       while (true) {
-        let peer = this._writePeer(collection, location, tried);
+        await this.whenReady();
+        let peer = this._table.nearest(id);
 
         if (!peer) {
           await this.discoverPeers();
-          peer = this._writePeer(collection, location, tried);
+          peer = this._table.nearest(id);
         }
 
         if (!peer) {
-          throw new Error("No peers available for write ingress.");
+          throw new Error("Failed to find peers with bootstrap hosts.");
         }
-        tried.add(peer.hash());
 
         try {
           const deleteItemKey = `deleteItem:${collection}:${root}:${location}:${reference}`;
-
           await this._throttler.enqueue(deleteItemKey, () =>
-            this._api.deleteItem(
-              this._protocol,
-              peer,
-              collection,
-              root,
-              location,
-              reference
+            this._withActivity(peer, "deleteItem", () =>
+              this._api.deleteItem(
+                this._protocol,
+                peer,
+                collection,
+                root,
+                location,
+                reference
+              ),
+              { collection, location }
             )
           );
-          // Drop our own copy for this location; ancestors expire on TTL.
-          this._cache.delete(`${collection}:${location}`);
+          this.invalidate(collection, location);
           return;
         } catch (error) {
           this._table.remove(peer.id());
           console.warn(
             `Failed to delete item via peer ${peer.hash()}. Retrying with a different peer...`
           );
-
           attempts--;
           if (attempts === 0) {
             throw new Error("Failed to delete item after multiple attempts.");
@@ -3296,114 +5635,587 @@
     }
 
     /**
-     * Retrieves a set. First hop uses the session routing key so the nearest
-     * neighbor is the ingress seed (traffic spread). deep=true asks that peer
-     * to path-fill recursively into its LRU; deep=false asks for a contact
-     * redirect only.
+     * Children of one zone — permanent convenience alias over
+     * {@link getSets}([location]). Shares wire protocol, cache, and navigation.
+     * @param {string} collection
+     * @param {string} location
+     * @param {{ navigation?: ReadNavigation, method?: ReadMethod, refresh?: boolean }} [options]
+     * @returns {Promise<any[]>}
      */
-    async getSet(collection, location, deep = true) {
-      let attempts = this._attempts;
-      let next = location;
+    async getSet(collection, location, options = {}) {
+      const map = await this.getSets(collection, [location], options);
+      const bucket = map.get(location);
+      return Array.isArray(bucket) ? bucket : [];
+    }
 
-      const cacheKey = `${collection}:${location}`;
+    /**
+     * XOR-nearest peer for `id`, skipping peers already on the redirect path.
+     * Must not await while peers are temporarily removed from the table.
+     * @param {Uint8Array} id
+     * @param {Set<string>} viaSet
+     * @returns {import("./peer.js").Peer | null}
+     */
+    _nearestExcluding(id, viaSet) {
+      if (!viaSet || viaSet.size === 0) {
+        return this._table.nearest(id);
+      }
+      const removed = [];
+      for (const peer of this._table.peers()) {
+        if (viaSet.has(peer.hash())) {
+          this._table.remove(peer.id());
+          removed.push(peer);
+        }
+      }
+      try {
+        return this._table.nearest(id);
+      } finally {
+        for (const peer of removed) {
+          this._table.insert(peer.id(), peer);
+        }
+      }
+    }
 
-      if (this._cache.has(cacheKey)) {
-        const cachedSet = this._cache.get(cacheKey);
-        this._cache.delete(cacheKey);
-        this._cache.set(cacheKey, cachedSet);
-        return cachedSet;
+    /**
+     * LRU bump for an existing cache entry; undefined if absent.
+     * @param {string} cacheKey
+     * @returns {any[] | undefined}
+     */
+    _touchCacheEntry(cacheKey) {
+      if (!this._cache.has(cacheKey)) {
+        return undefined;
+      }
+      const cached = this._cache.get(cacheKey);
+      this._cache.delete(cacheKey);
+      this._cache.set(cacheKey, cached);
+      return cached;
+    }
+
+    /**
+     * @param {string} cacheKey
+     * @param {any[]} bucket
+     */
+    _putCacheChildren(cacheKey, bucket) {
+      if (!this._cache.has(cacheKey) && this._cache.size >= this._cacheSize) {
+        const firstKey = this._cache.keys().next().value;
+        this._cache.delete(firstKey);
+        this._cacheFetchedAt.delete(firstKey);
+      }
+      this._cache.set(cacheKey, bucket);
+      this._cacheFetchedAt.set(cacheKey, Date.now());
+    }
+
+    /**
+     * True while the cached answer for `cacheKey` is young enough that a
+     * `refresh` read may reuse it instead of going back on the wire.
+     * @param {string} cacheKey
+     * @param {number} now
+     */
+    _refreshWithinTtl(cacheKey, now) {
+      if (this._refreshTtlMs <= 0) return false;
+      const fetchedAt = this._cacheFetchedAt.get(cacheKey);
+      return fetchedAt !== undefined && now - fetchedAt < this._refreshTtlMs;
+    }
+
+    /**
+     * Publish one read wave as the in-flight owner of every zone it covers, so
+     * a parallel drill for the same zone joins it instead of duplicating it.
+     * @param {string} collection
+     * @param {string[]} locations
+     * @param {Promise<any>} promise
+     * @param {boolean} refresh
+     */
+    _trackInflight(collection, locations, promise, refresh) {
+      const entry = { promise, refresh };
+      const keys = locations.map((location) => zoneKey(collection, location));
+      for (const key of keys) {
+        this._inflight.set(key, entry);
+      }
+      const release = () => {
+        for (const key of keys) {
+          if (this._inflight.get(key) === entry) this._inflight.delete(key);
+        }
+      };
+      promise.then(release, release);
+    }
+
+    /**
+     * Single `/sets` wave for one chunk of parent locations (after cache filtering).
+     * @param {string} collection
+     * @param {string[]} locations
+     * @param {boolean} [refresh] - ask the node past its own cache too. Dropping
+     *   our cache alone only re-reads the same stale answer.
+     * @param {{ navigation?: ReadNavigation }} [options]
+     */
+    async _fetchSetsChunk(collection, locations, refresh = false, options = {}) {
+      const stillMissing = refresh
+        ? locations.slice()
+        : locations.filter(
+            (location) => !this._cache.has(zoneKey(collection, location))
+          );
+      if (stillMissing.length === 0) {
+        return;
       }
 
-      const getSetKey = `getSet:${collection}:${location}`;
+      const navigation = normalizeNavigation(
+        options.navigation ?? this._readNavigation
+      );
+      if (navigation === "direct") {
+        await this._fetchSetsDirect(collection, stillMissing, refresh);
+        return;
+      }
+      await this._fetchSetsIngress(collection, stillMissing, refresh);
+    }
 
-      return this._throttler.enqueue(getSetKey, async () => {
+    /**
+     * Sticky client-key ingress, deep=true, routing-key header + hint adoption.
+     */
+    async _fetchSetsIngress(collection, stillMissing, refresh = false) {
+      let attempts = this._attempts;
+
+      while (true) {
         await this.whenReady();
-        let useRoutingKey = true;
-        while (true) {
-          const id = useRoutingKey
-            ? this._routingKey
-            : transform(collection, next);
 
-          let peer = this._table.nearest(id);
+        let peer = this.ingressPeer();
 
-          if (!peer) {
-            await this.discoverPeers();
-            peer = this._table.nearest(id);
+        if (!peer) {
+          await this.discoverPeers();
+          peer = this.ingressPeer();
+        }
+
+        if (!peer) {
+          throw new Error("Failed to find peers with bootstrap hosts.");
+        }
+
+        try {
+          const { elements, ingress } = await this._withActivity(
+            peer,
+            "getSets",
+            () =>
+              this._api.getSets(this._protocol, peer, collection, stillMissing, {
+                deep: true,
+                refresh,
+                envelope: false,
+                routingKey: this._routingKey,
+              }),
+            { collection, location: stillMissing[0] }
+          );
+
+          this._adoptIngressHint(ingress);
+          this._storeFetchedBuckets(collection, stillMissing, elements, refresh);
+          return;
+        } catch (error) {
+          const status = error?.response?.status ?? null;
+          this._table.remove(peer.id());
+          if (status === null) {
+            this._hintRejected.add(peer.hash());
           }
+          this._notifyPeers();
+          console.warn(
+            `Failed to get sets via peer ${peer.hash()}${
+            status === null ? " (unreachable)" : ` (HTTP ${status})`
+          }. Retrying with a different peer...`
+          );
+          debugLog("sets", "peer dropped for this read", {
+            peer: peer.hash(),
+            status,
+            blacklisted: status === null,
+            locations: stillMissing.length,
+            first: stillMissing[0],
+            attemptsLeft: attempts - 1,
+            navigation: "ingress",
+          });
 
-          if (!peer) {
-            throw new Error("Failed to find peers with bootstrap hosts.");
-          }
-
-          try {
-            const response = await this._api.getSet(
-              this._protocol,
-              peer,
-              collection,
-              location,
-              deep
-            );
-
-            if (
-              response.contact instanceof Peer &&
-              response.contact.hash() !== peer.hash()
-            ) {
-              this._table.insert(response.contact.id(), response.contact);
-              if (response.set === null) {
-                // Follow toward owner / path-fill contact.
-                useRoutingKey = false;
-                continue;
-              }
-            }
-
-            if (response.set !== null) {
-              if (this._cache.size >= this._cacheSize) {
-                const firstKey = this._cache.keys().next().value;
-                this._cache.delete(firstKey);
-              }
-              this._cache.set(cacheKey, response.set);
-              return response.set;
-            }
-
-            if (next === ROOT) {
-              return [];
-            }
-            next = parent$1(next);
-            useRoutingKey = true;
-          } catch (error) {
-            this._table.remove(peer.id());
-            console.warn(
-              `Failed to get set via peer ${peer.hash()}. Retrying with a different peer...`
-            );
-
-            attempts--;
-            if (attempts === 0) {
-              throw new Error("Failed to retrieve set after multiple attempts.");
-            }
+          attempts--;
+          if (attempts === 0) {
+            throw new Error("Failed to retrieve sets after multiple attempts.");
           }
         }
+      }
+    }
+
+    /**
+     * Client-managed ownership following: deep=false, IXS1 redirects, regroup by
+     * owner, parent-key peer fallback, bounded via. Never relies on server-side
+     * inter-node deep reads.
+     */
+    async _fetchSetsDirect(collection, stillMissing, refresh = false) {
+      await this.whenReady();
+      if (!this.ingressPeer()) {
+        await this.discoverPeers();
+      }
+
+      /** @type {Map<string, { via: Set<string>, probe: string, peer: import("./peer.js").Peer | null }>} */
+      const pending = new Map();
+      for (const location of stillMissing) {
+        pending.set(location, {
+          via: new Set(),
+          probe: location,
+          peer: null,
+        });
+      }
+
+      const maxRounds = Math.max(8, this._attempts * stillMissing.length);
+      for (let round = 0; round < maxRounds && pending.size > 0; round++) {
+        /** @type {Map<string, { peer: import("./peer.js").Peer, locations: string[], via: string[] }>} */
+        const groups = new Map();
+
+        for (const [location, state] of pending) {
+          let peer = state.peer;
+          if (!peer) {
+            const id = zoneKeyID(collection, state.probe);
+            peer = this._nearestExcluding(id, state.via);
+          }
+          if (!peer) {
+            this._putCacheChildren(zoneKey(collection, location), []);
+            pending.delete(location);
+            continue;
+          }
+          const key = peer.hash();
+          let group = groups.get(key);
+          if (!group) {
+            group = {
+              peer,
+              locations: [],
+              via: [...state.via],
+            };
+            groups.set(key, group);
+          }
+          group.locations.push(location);
+          for (const name of state.via) {
+            if (!group.via.includes(name)) group.via.push(name);
+          }
+        }
+
+        if (groups.size === 0) break;
+
+        await Promise.all(
+          [...groups.values()].map((group) =>
+            this._directRound(collection, group, pending, refresh)
+          )
+        );
+      }
+
+      for (const location of pending.keys()) {
+        this._putCacheChildren(zoneKey(collection, location), []);
+      }
+    }
+
+    /**
+     * @param {string} collection
+     * @param {{ peer: import("./peer.js").Peer, locations: string[], via: string[] }} group
+     * @param {Map<string, { via: Set<string>, probe: string, peer: import("./peer.js").Peer | null }>} pending
+     * @param {boolean} refresh
+     */
+    async _directRound(collection, group, pending, refresh) {
+      const { peer, locations, via } = group;
+      try {
+        const { elements, redirects } = await this._withActivity(
+          peer,
+          "getSets",
+          () =>
+            this._api.getSets(this._protocol, peer, collection, locations, {
+              deep: false,
+              envelope: true,
+              refresh,
+              via,
+            }),
+          { collection, location: locations[0] }
+        );
+
+        const byParent = distributeElementsByParent(locations, elements);
+        /** @type {Map<string, { name: string, ip: string, port: number }>} */
+        const redirectByLoc = new Map();
+        for (const redirect of redirects || []) {
+          if (redirect?.location) redirectByLoc.set(redirect.location, redirect);
+        }
+
+        for (const location of locations) {
+          const state = pending.get(location);
+          if (!state) continue;
+          state.via.add(peer.hash());
+
+          const bucket = byParent.get(location) ?? [];
+          if (bucket.length > 0) {
+            if (refresh && debugEnabled("refresh")) {
+              const before = this._cache.get(zoneKey(collection, location));
+              const delta =
+                abelianTotal(bucket).count - abelianTotal(before ?? []).count;
+              if (delta !== 0) {
+                debugLog("refresh", "zone moved", {
+                  location,
+                  was: abelianTotal(before ?? []).count,
+                  now: abelianTotal(bucket).count,
+                  delta: signed(delta),
+                });
+              }
+            }
+            this._putCacheChildren(zoneKey(collection, location), bucket);
+            pending.delete(location);
+            continue;
+          }
+
+          const redirect = redirectByLoc.get(location);
+          if (redirect && redirect.name && redirect.port > 0) {
+            if (state.via.has(redirect.name)) {
+              this._putCacheChildren(zoneKey(collection, location), []);
+              pending.delete(location);
+              continue;
+            }
+            try {
+              const next = new Peer(
+                redirect.name,
+                { [redirect.ip]: null },
+                redirect.port,
+                redirect.ip
+              );
+              this._table.insert(next.id(), next);
+              state.peer = next;
+              this._notifyPeers();
+              continue;
+            } catch {
+              /* fall through to parent probe */
+            }
+          }
+
+          // Parent-key peer fallback while still requesting the original location.
+          if (state.probe === ROOT) {
+            this._putCacheChildren(zoneKey(collection, location), []);
+            pending.delete(location);
+            continue;
+          }
+          const nextProbe = parent$1(state.probe);
+          if (!nextProbe) {
+            this._putCacheChildren(zoneKey(collection, location), []);
+            pending.delete(location);
+            continue;
+          }
+          state.probe = nextProbe;
+          state.peer = null;
+        }
+      } catch (error) {
+        const status = error?.response?.status ?? null;
+        this._table.remove(peer.id());
+        if (status === null) {
+          this._hintRejected.add(peer.hash());
+        }
+        this._notifyPeers();
+        for (const location of locations) {
+          const state = pending.get(location);
+          if (!state) continue;
+          state.via.add(peer.hash());
+          state.peer = null;
+        }
+        debugLog("sets", "direct peer dropped", {
+          peer: peer.hash(),
+          status,
+          locations: locations.length,
+          first: locations[0],
+        });
+      }
+    }
+
+    /**
+     * @param {string} collection
+     * @param {string[]} locations
+     * @param {any[]} elements flat `/sets` element list spanning the parents
+     * @param {boolean} refresh
+     */
+    _storeFetchedBuckets(collection, locations, elements, refresh) {
+      const byParent = distributeElementsByParent(locations, elements || []);
+      for (let i = 0; i < locations.length; i++) {
+        const location = locations[i];
+        const bucket = byParent.get(location) ?? [];
+        if (refresh && debugEnabled("refresh")) {
+          const before = this._cache.get(zoneKey(collection, location));
+          const delta =
+            abelianTotal(bucket).count - abelianTotal(before ?? []).count;
+          if (delta !== 0) {
+            debugLog("refresh", "zone moved", {
+              location,
+              was: abelianTotal(before ?? []).count,
+              now: abelianTotal(bucket).count,
+              delta: signed(delta),
+            });
+          }
+        }
+        this._putCacheChildren(zoneKey(collection, location), bucket);
+      }
+    }
+
+    /**
+     * @param {string} collection
+     * @param {{ partialPrefix: Map<string, any[]>, uniqInput: string[] }} waiter
+     */
+    _finalizeSetsWaiter(collection, waiter) {
+      const out = new Map(waiter.partialPrefix);
+      for (const location of waiter.uniqInput) {
+        if (out.has(location)) continue;
+        const cached = location
+          ? this._touchCacheEntry(zoneKey(collection, location))
+          : null;
+        out.set(location, Array.isArray(cached) ? cached : []);
+      }
+      return out;
+    }
+
+    /**
+     * Batch retrieval via GET `/sets` (binary). Populates the same LRU cache as {@link getSet}
+     * per parent location. Concurrent callers for the same collection are merged into shared
+     * HTTP batches when method=getSets (see SetsCoalescePool). Returns a map parent → children.
+     *
+     * @param {string} collection
+     * @param {string[]} locations
+     * @param {{
+     *   refresh?: boolean,
+     *   navigation?: ReadNavigation,
+     *   method?: ReadMethod,
+     * }} [options]
+     * @returns {Promise<Map<string, import("../entities/item.js").Item[] | import("../entities/set.js").Set[]>>}
+     */
+    async getSets(collection, locations, options = {}) {
+      if (!Array.isArray(locations) || locations.length === 0) {
+        return new Map();
+      }
+
+      const refresh = options.refresh === true;
+      const navigation = normalizeNavigation(
+        options.navigation ?? this._readNavigation
+      );
+      const method = normalizeMethod(options.method ?? this._readMethod);
+      const uniqInput = [...new Set(locations.map((s) => String(s)))];
+      /** @type {Map<string, any[]>} */
+      const result = new Map();
+
+      const missingForFetch = [];
+      const now = Date.now();
+
+      for (const location of uniqInput) {
+        if (!location) {
+          result.set(location, []);
+          continue;
+        }
+        // Include ROOT `@` — Aggregate drills from `@` and child locations do
+        // not start with `@` (handled in distributeElementsByParent).
+        const cacheKey = zoneKey(collection, location);
+        const cached = this._touchCacheEntry(cacheKey);
+        if (
+          cached === undefined ||
+          (refresh && !this._refreshWithinTtl(cacheKey, now))
+        ) {
+          missingForFetch.push(location);
+        } else {
+          result.set(location, Array.isArray(cached) ? cached : []);
+        }
+      }
+
+      if (missingForFetch.length === 0) {
+        return result;
+      }
+
+      // Zones another caller already has on the wire: wait for that answer
+      // rather than opening a second request for the same parent.
+      const joined = [];
+      const toFetch = [];
+      for (const location of missingForFetch) {
+        const inflight = this._inflight.get(zoneKey(collection, location));
+        if (inflight && (inflight.refresh || !refresh)) {
+          joined.push(inflight.promise);
+        } else {
+          toFetch.push(location);
+        }
+      }
+
+      if (toFetch.length > 0) {
+        // Per-call overrides that differ from the shared session config bypass
+        // the coalesce pool so they cannot merge with a different
+        // navigation/method.
+        const overridesSession =
+          navigation !== this._readNavigation || method !== this._readMethod;
+
+        const wave = this._runSetsWave(collection, toFetch, refresh, {
+          navigation,
+          method,
+          overridesSession,
+        });
+        this._trackInflight(collection, toFetch, wave, refresh);
+        joined.push(wave);
+      }
+
+      // A wave that joined someone else's failure must not mask the zones the
+      // other waves did resolve; only a read that produced nothing at all fails.
+      const settled = await Promise.allSettled(joined);
+      const failure = settled.find((outcome) => outcome.status === "rejected");
+      if (failure && !this._anyCached(collection, missingForFetch)) {
+        throw failure.reason;
+      }
+
+      return this._finalizeSetsWaiter(collection, {
+        partialPrefix: result,
+        uniqInput,
       });
     }
 
     /**
-     * Batch getSets via the session routing-key ingress seed (same distribution
-     * as getSet). deep defaults true so the seed path-fills misses into its LRU.
+     * @param {string} collection
+     * @param {string[]} locations
      */
-    async getSets(collection, locations, options = {}) {
-      await this.whenReady();
-      let peer = this._table.nearest(this._routingKey);
-      if (!peer) {
-        await this.discoverPeers();
-        peer = this._table.nearest(this._routingKey);
+    _anyCached(collection, locations) {
+      for (const location of locations) {
+        if (location && this._cache.has(zoneKey(collection, location))) return true;
       }
-      if (!peer) {
-        throw new Error("Failed to find peers with bootstrap hosts.");
+      return false;
+    }
+
+    /**
+     * Run one read wave for zones that are neither cached nor in flight.
+     * @param {string} collection
+     * @param {string[]} locations
+     * @param {boolean} refresh
+     * @param {{ navigation: ReadNavigation, method: ReadMethod, overridesSession: boolean }} config
+     */
+    async _runSetsWave(collection, locations, refresh, config) {
+      const { navigation, method, overridesSession } = config;
+
+      if (!overridesSession && method !== "getSet") {
+        await this._setsPool.submit(
+          collection,
+          new Map(),
+          locations,
+          locations,
+          refresh
+        );
+        return;
       }
-      const deep = options.deep !== false;
-      return this._api.getSets(this._protocol, peer, collection, locations, {
-        ...options,
-        deep,
-      });
+
+      if (method !== "getSet") {
+        await this._fetchSetsChunk(collection, locations, refresh, { navigation });
+        return;
+      }
+
+      const parallel = Math.min(
+        this._setsPoolCfg.setsMaxParallelChunks,
+        locations.length
+      );
+      for (let i = 0; i < locations.length; i += parallel) {
+        const wave = locations.slice(i, i + parallel);
+        await Promise.all(
+          wave.map((location) =>
+            this._fetchSetsChunk(collection, [location], refresh, { navigation })
+          )
+        );
+      }
+    }
+
+    /**
+     * Drop a single cached `/sets` entry so the next getSets refetches.
+     * @param {string} collection
+     * @param {string} location
+     */
+    invalidate(collection, location) {
+      if (collection == null || location == null) return;
+      const key = zoneKey(collection, location);
+      this._cache.delete(key);
+      this._cacheFetchedAt.delete(key);
     }
   }
 
@@ -3574,19 +6386,19 @@
   }function umask() { return 0; }
 
   // from https://github.com/kumavis/browser-process-hrtime/blob/master/index.js
-  var performance = global$1.performance || {};
+  var performance$1 = global$1.performance || {};
   var performanceNow =
-    performance.now        ||
-    performance.mozNow     ||
-    performance.msNow      ||
-    performance.oNow       ||
-    performance.webkitNow  ||
+    performance$1.now        ||
+    performance$1.mozNow     ||
+    performance$1.msNow      ||
+    performance$1.oNow       ||
+    performance$1.webkitNow  ||
     function(){ return (new Date()).getTime() };
 
   // generate timestamp or delta
   // see http://nodejs.org/api/process.html#process_process_hrtime
   function hrtime(previousTimestamp){
-    var clocktime = performanceNow.call(performance)*1e-3;
+    var clocktime = performanceNow.call(performance$1)*1e-3;
     var seconds = Math.floor(clocktime);
     var nanoseconds = Math.floor((clocktime%1)*1e9);
     if (previousTimestamp) {
@@ -9412,14 +12224,11 @@
 
       // Create a Peer instance from the contact data
       const contactData = data.contact;
-      // Missing client_ready (old binary) ⇒ assume ready; explicit false ⇒ joining.
-      const clientReady = data?.client_ready !== false;
       const contactPeer = new Peer(
         contactData.name,
         contactData.ips,
         contactData.port,
-        ip,
-        clientReady
+        ip
       );
       return contactPeer;
     } catch (error) {
@@ -9502,23 +12311,7 @@
         }
       );
     } catch (error) {
-      const status = error?.response?.status;
-      const retryAfter = error?.response?.headers?.["retry-after"];
-      if (status === 503 && retryAfter) {
-        const ms = Math.max(1, Number(retryAfter)) * 1000;
-        await new Promise((r) => setTimeout(r, ms));
-        // One soft retry after backpressure.
-        await axios$1.post(
-          `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
-          requestBody,
-          {
-            headers: authHeaders({
-              "Content-Type": "application/json",
-            }),
-          }
-        );
-        return;
-      }
+      // Handle and log errors
       console.error("Error adding item to the collection:", error);
       throw error;
     }
@@ -9551,7 +12344,6 @@
         id: reference,
       },
       root: root,
-      current: location,
     };
     const headers = authHeaders({
       "Content-Type": "application/json",
@@ -9575,315 +12367,127 @@
   }
 
   /**
-   * Retrieves a set from a collection at a specified location.
-   *
-   * @param {string} protocol - Protocol to use to contact the peer http/https.
-   * @param {Peer} peer - The peer to contact (ingress seed).
-   * @param {string} collection - The ID of the collection.
-   * @param {string} location - The location within the collection.
-   * @param {boolean} deep - Path-fill: true lets the peer recurse to the owner
-   *   and fill its LRU; false asks for a contact redirect only.
-   * @returns {Promise<Object>} - The response from the server, including the set data.
+   * IXS1 opt-in wrapper around EncodeSets: redirects + legacy binary body.
+   * Matches core/domain/sets_envelope.go.
    */
-  async function getSet(protocol, peer, collection, location, deep = true) {
-    const url = `${protocol}://${getHostFromIP(
-    peer.ip()
-  )}:${peer.port()}/set?collection=${encodeURIComponent(
-    collection
-  )}&location=${encodeURIComponent(location)}&deep=${deep ? "true" : "false"}`;
 
-    try {
-      const response = await axios$1.get(url, {
-        headers: authHeaders(),
-      });
-
-      const data = response.data;
-
-      /**
-       * Parses the set data and constructs Element instances.
-       * @param {Object.<string, number>} setData - The set data from the response.
-       * @param {string} collection - The name of the collection.
-       * @returns {Element[]} - An array of Element instances (Item or Set).
-       */
-      const parseSet = (setData, collection) => {
-        const elements = [];
-
-        for (const [key, value] of Object.entries(setData)) {
-          if (value.count === 1) {
-            const [hash, reference] = key.split(":");
-            if (hash && reference) {
-              elements.push(new Item$1(collection, hash, value.metrics, reference));
-            } else {
-              console.warn(`Invalid item key format: ${key}`);
-            }
-          } else {
-            const hash = key;
-            const count = value.count;
-            elements.push(new Set$1(collection, hash, count, value.metrics));
-          }
-        }
-
-        return elements;
-      };
-
-      const contactData = data.contact;
-      const contactPeer = new Peer(
-        contactData.name,
-        contactData.ips,
-        contactData.port,
-        contactData.ip
-      );
-
-      const elements = data.set !== null ? parseSet(data.set, collection) : null;
-
-      return {
-        contact: contactPeer,
-        set: elements,
-      };
-    } catch (error) {
-      console.error(`Error retrieving set from peer ${peer.hash()}:`, error);
-      throw error;
-    }
-  }
+  const MAGIC = new Uint8Array([0x49, 0x58, 0x53, 0x31]); // IXS1
 
   /**
-   * Single-item rows use either `childHash:itemReference` or a bare hash segment
-   * (Go shrink / leaf entries). Only the colon form existed historically in JS.
+   * @param {Uint8Array} u8
+   * @returns {boolean}
    */
-  function itemKeyParts(key) {
-    if (typeof key !== "string" || key.length === 0) {
-      return null;
-    }
-    const i = key.indexOf(":");
-    if (i <= 0) {
-      return { hash: key, reference: key };
-    }
-    const hash = key.slice(0, i);
-    const reference = key.slice(i + 1);
-    if (!reference) {
-      return { hash, reference: hash };
-    }
-    return { hash, reference };
+  function isSetsEnvelope(u8) {
+    return (
+      u8 instanceof Uint8Array &&
+      u8.byteLength >= 4 &&
+      u8[0] === MAGIC[0] &&
+      u8[1] === MAGIC[1] &&
+      u8[2] === MAGIC[2] &&
+      u8[3] === MAGIC[3]
+    );
   }
 
-  /**
-   * @param {Object<string, { count: number, metrics?: number[] }>} setData
-   * @param {string} collection
-   * @returns {Array<Item|Set>}
-   */
-  function parseSetMap(setData, collection) {
-    if (!setData || typeof setData !== "object") {
-      return [];
-    }
-    const elements = [];
-    for (const [key, value] of Object.entries(setData)) {
-      if (!value || typeof value.count !== "number") {
-        continue;
-      }
-      if (value.count === 1) {
-        const parts = itemKeyParts(key);
-        if (!parts) {
-          continue;
-        }
-        elements.push(
-          new Item$1(collection, parts.hash, value.metrics, parts.reference)
-        );
-      } else {
-        elements.push(new Set$1(collection, key, value.count, value.metrics));
-      }
-    }
-    return elements;
+  function readU16BE(u8, offset) {
+    return ((u8[offset] << 8) | u8[offset + 1]) >>> 0;
   }
-
-  /**
-   * Binary encoder for GET /sets (go-indexus-core domain.Collection.GetMultiple).
-   *
-   * Stream = concatenated blocks (multi-owner responses are concatenated too).
-   * Each non-empty depth bucket:
-   *   - u8 depthIndex           // keys have byte length depthIndex + 1
-   *   - u32 BE entry count `size`
-   *   - `propertyCount` × u8    // bits.Len(max) per packed column (may be 0)
-   *   - `size * (depthIndex+1)` key bytes (UTF-8; typically ASCII hashes)
-   *   - For each property j: ceil(size * bitCounts[j] / 8) bytes — packed ints MSB-first
-   *
-   * Server strips `:reference` from keys using the colon (not a fixed prefix length).
-   * Packed ints match Go encodeBits / sequential MSB bitstream (same order as metrics columns).
-   */
-
-  /** Matches http/p2p/p2p.go GetMultiple defaults. */
-  const SETS_BINARY_PROPERTY_COUNT = 4;
-
-  /** Inverse of metricInt scaling in go-indexus-core/http/p2p/p2p.go */
-  const DEFAULT_SETS_METRIC_DECODE = [
-    { propIndex: 1, metricIndex: 2, divisor: 1 },
-    { propIndex: 2, metricIndex: 3, divisor: 1_000_000 },
-    { propIndex: 3, metricIndex: 4, divisor: 1_000_000 },
-  ];
 
   function readU32BE(u8, offset) {
     return (
-      (u8[offset] << 24) |
-      (u8[offset + 1] << 16) |
-      (u8[offset + 2] << 8) |
-      u8[offset + 3]
-    ) >>> 0;
+      ((u8[offset] << 24) |
+        (u8[offset + 1] << 16) |
+        (u8[offset + 2] << 8) |
+        u8[offset + 3]) >>>
+      0
+    );
+  }
+
+  function readLengthPrefixed(u8, offset) {
+    if (offset + 2 > u8.byteLength) {
+      throw new Error("sets envelope: truncated length");
+    }
+    const n = readU16BE(u8, offset);
+    offset += 2;
+    if (offset + n > u8.byteLength) {
+      throw new Error("sets envelope: truncated string");
+    }
+    const s = new TextDecoder().decode(u8.subarray(offset, offset + n));
+    return { value: s, offset: offset + n };
   }
 
   /**
-   * Decode `count` unsigned integers packed `bitsPerValue` wide (MSB-first), Go encodeBits order.
+   * @param {Uint8Array | ArrayBuffer} buffer
+   * @returns {{
+   *   ok: boolean,
+   *   redirects: Array<{ location: string, name: string, ip: string, port: number }>,
+   *   body: Uint8Array,
+   * }}
    */
-  function decodePackedInts(u8, offset, count, bitsPerValue) {
-    if (bitsPerValue <= 0) {
-      return { values: new Array(count).fill(0), bytesConsumed: 0 };
-    }
-    const values = new Array(count);
-    let bitPos = 0;
-    const totalBits = count * bitsPerValue;
-    const bytesConsumed = Math.ceil(totalBits / 8);
-
-    if (offset + bytesConsumed > u8.length) {
-      throw new Error(
-        `decodePackedInts: need ${bytesConsumed} bytes at offset ${offset}, len=${u8.length}`
-      );
-    }
-
-    for (let i = 0; i < count; i++) {
-      let v = 0n;
-      for (let b = 0; b < bitsPerValue; b++) {
-        const globalBit = bitPos;
-        bitPos++;
-        const byteIdx = offset + (globalBit >> 3);
-        const bitInByte = globalBit & 7;
-        const bit = (u8[byteIdx] >> (7 - bitInByte)) & 1;
-        v = (v << 1n) | BigInt(bit);
-      }
-      values[i] = Number(v);
-    }
-
-    return { values, bytesConsumed };
-  }
-
-  /**
-   * @param {ArrayBuffer | Uint8Array} buffer
-   * @param {{ propertyCount?: number }} options
-   */
-  function decodeSetsBinary(buffer, options = {}) {
+  function decodeSetsEnvelope(buffer) {
     const u8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-    const propertyCount =
-      Number(options.propertyCount) > 0
-        ? Math.floor(Number(options.propertyCount))
-        : SETS_BINARY_PROPERTY_COUNT;
-
-    const blocks = [];
-    let offset = 0;
-    const decoder = new TextDecoder("utf-8");
-
-    while (offset < u8.length) {
-      const depthIndex = u8[offset++];
-      if (offset + 4 > u8.length) {
-        throw new Error("decodeSetsBinary: truncated header (size)");
-      }
-      const size = readU32BE(u8, offset);
-      offset += 4;
-
-      if (offset + propertyCount > u8.length) {
-        throw new Error("decodeSetsBinary: truncated header (bitCounts)");
-      }
-      const bitCounts = [];
-      for (let j = 0; j < propertyCount; j++) {
-        bitCounts.push(u8[offset++]);
-      }
-
-      const keyLen = depthIndex + 1;
-      const keysTotalBytes = size * keyLen;
-      if (offset + keysTotalBytes > u8.length) {
-        throw new Error("decodeSetsBinary: truncated keys segment");
-      }
-
-      const keys = [];
-      for (let i = 0; i < size; i++) {
-        const start = offset + i * keyLen;
-        keys.push(decoder.decode(u8.subarray(start, start + keyLen)));
-      }
-      offset += keysTotalBytes;
-
-      const columns = [];
-      for (let j = 0; j < propertyCount; j++) {
-        const { values, bytesConsumed } = decodePackedInts(
-          u8,
-          offset,
-          size,
-          bitCounts[j]
-        );
-        columns.push(values);
-        offset += bytesConsumed;
-      }
-
-      blocks.push({
-        depthIndex,
-        size,
-        keys,
-        columns,
-        bitCounts,
-      });
+    if (!isSetsEnvelope(u8)) {
+      return { ok: false, redirects: [], body: u8 };
     }
-
-    return { blocks, propertyCount };
-  }
-
-  function buildMetricsRow(columns, rowIndex, decodeRules = DEFAULT_SETS_METRIC_DECODE) {
-    const metrics = [];
-    for (let r = 0; r < decodeRules.length; r++) {
-      const rule = decodeRules[r];
-      const raw = columns[rule.propIndex]?.[rowIndex];
-      const num = Number.isFinite(raw) ? raw : 0;
-      metrics[rule.metricIndex] = rule.divisor === 1 ? num : num / rule.divisor;
+    if (u8.byteLength < 8) {
+      throw new Error("sets envelope: truncated header");
     }
-    return metrics;
+    const count = readU32BE(u8, 4);
+    let offset = 8;
+    /** @type {Array<{ location: string, name: string, ip: string, port: number }>} */
+    const redirects = [];
+    for (let i = 0; i < count; i++) {
+      let location;
+      let name;
+      let ip;
+      ({ value: location, offset } = readLengthPrefixed(u8, offset));
+      ({ value: name, offset } = readLengthPrefixed(u8, offset));
+      ({ value: ip, offset } = readLengthPrefixed(u8, offset));
+      if (offset + 2 > u8.byteLength) {
+        throw new Error("sets envelope: truncated port");
+      }
+      const port = readU16BE(u8, offset);
+      offset += 2;
+      redirects.push({ location, name, ip, port });
+    }
+    return { ok: true, redirects, body: u8.subarray(offset) };
   }
 
   /**
-   * Same Abelian-shaped map as JSON `/set` payloads (`{ count, metrics }`), keyed like GetMultiple output.
+   * @param {Record<string, string>} headers
+   * @returns {{ name: string, ip: string, port: number } | null}
    */
-  function binaryBlocksToRawMap(blocks, decodeRules = DEFAULT_SETS_METRIC_DECODE) {
-    const shaped = {};
-    for (let b = 0; b < blocks.length; b++) {
-      const block = blocks[b];
-      const { size, keys, columns } = block;
-      const counts = columns[0];
-      if (!counts || counts.length !== size) continue;
-
-      for (let i = 0; i < size; i++) {
-        const key = keys[i];
-        shaped[key] = {
-          count: counts[i],
-          metrics: buildMetricsRow(columns, i, decodeRules),
-        };
-      }
-    }
-    return shaped;
+  function ingressFromHeaders(headers) {
+    const name = headers["x-indexus-ingress-name"];
+    const ip = headers["x-indexus-ingress-ip"];
+    const port = Number(headers["x-indexus-ingress-port"]);
+    if (!name || !ip || !(port > 0)) return null;
+    return { name, ip, port };
   }
 
   /**
-   * Turns decoded blocks into the same `{ hash: { count, metrics } }` shape as JSON /set,
-   * then reuses parseSetMap for Item vs Set constructor parity.
-   */
-  function binaryBlocksToElements(collection, blocks, decodeRules = DEFAULT_SETS_METRIC_DECODE) {
-    return parseSetMap(binaryBlocksToRawMap(blocks, decodeRules), collection);
-  }
-
-  /**
-   * Batch fetch via GET `/sets` (binary octet-stream). Same path-fill model as
-   * `/set`: the contacted peer is the ingress seed; deep=true fills misses via
-   * inter-node recursion into that peer's LRU. No contact payload — keep using
-   * the seed peer.
+   * Batch fetch via GET `/sets` (binary). Both ingress and direct navigation use
+   * this wire format; `envelope=1` adds IXS1 owner redirects for deep=false.
    *
    * @param {string} protocol
-   * @param {Peer} peer
+   * @param {import("../network/peer.js").Peer} peer
    * @param {string} collection
    * @param {string[]} locations
-   * @param {{ propertyCount?: number, deep?: boolean }} [options]
-   * @returns {Promise<{ contact: Peer, set: ReturnType<typeof binaryBlocksToElements> }>}
+   * @param {{
+   *   propertyCount?: number,
+   *   deep?: boolean,
+   *   refresh?: boolean,
+   *   envelope?: boolean,
+   *   via?: string | string[],
+   *   routingKey?: Uint8Array,
+   * }} [options]
+   * @returns {Promise<{
+   *   elements: any[],
+   *   redirects: Array<{ location: string, name: string, ip: string, port: number }>,
+   *   ingress?: { name: string, ip: string, port: number } | null,
+   *   bytes?: number,
+   *   rows?: number,
+   *   folded?: number,
+   * }>}
    */
   async function getSets(protocol, peer, collection, locations, options = {}) {
     const cleaned = Array.isArray(locations)
@@ -9891,23 +12495,41 @@
       : [];
 
     if (cleaned.length === 0) {
-      return { contact: peer, set: [] };
+      return { elements: [], redirects: [], ingress: null };
     }
 
     const deep = options.deep !== false;
+    const refresh = options.refresh === true;
+    const envelope = options.envelope === true || (!deep && options.envelope !== false);
     const locationsParam = cleaned.join(",");
-    const url = `${protocol}://${getHostFromIP(
+    let url = `${protocol}://${getHostFromIP(
     peer.ip()
   )}:${peer.port()}/sets?collection=${encodeURIComponent(
     collection
   )}&location=${encodeURIComponent(locationsParam)}&deep=${
     deep ? "true" : "false"
-  }`;
+  }&refresh=${refresh ? "true" : "false"}`;
+    if (envelope) {
+      url += "&envelope=1";
+    }
+    if (options.via != null && options.via !== "") {
+      const via =
+        Array.isArray(options.via) ? options.via.filter(Boolean).join(",") : String(options.via);
+      if (via) url += `&via=${encodeURIComponent(via)}`;
+    }
+
+    /** @type {Record<string, string>} */
+    const extra = {};
+    if (options.routingKey instanceof Uint8Array && options.routingKey.length > 0) {
+      extra["X-Indexus-Routing-Key"] = encodeUrl64(options.routingKey);
+    }
 
     const response = await axios$1.get(url, {
       responseType: "arraybuffer",
-      headers: authHeaders(),
+      headers: authHeaders(extra),
     });
+
+    const ingress = ingressFromHeaders(response.headers);
 
     const raw = response.data;
     let u8 = null;
@@ -9921,7 +12543,26 @@
     }
 
     if (!u8 || u8.byteLength === 0) {
-      return { contact: peer, set: [] };
+      debugLog("sets", "empty payload", {
+        collection,
+        locations: cleaned.length,
+        first: cleaned[0],
+        refresh,
+        envelope,
+      });
+      return { elements: [], redirects: [], ingress, bytes: 0, rows: 0, folded: 0 };
+    }
+
+    let redirects = [];
+    let body = u8;
+    const framed = decodeSetsEnvelope(u8);
+    if (framed.ok) {
+      redirects = framed.redirects;
+      body = framed.body;
+    }
+
+    if (!body || body.byteLength === 0) {
+      return { elements: [], redirects, ingress, bytes: u8.byteLength, rows: 0, folded: 0 };
     }
 
     const propertyCount =
@@ -9929,13 +12570,72 @@
         ? Math.floor(Number(options.propertyCount))
         : SETS_BINARY_PROPERTY_COUNT;
 
-    const { blocks } = decodeSetsBinary(u8, { propertyCount });
-    const set = binaryBlocksToElements(collection, blocks);
+    const { blocks } = decodeSetsBinary(body, { propertyCount });
+    const stats = { folded: 0 };
+    const elements = binaryBlocksToElements(collection, blocks, undefined, stats);
+
+    let rows = 0;
+    for (let i = 0; i < blocks.length; i++) rows += blocks[i].size;
+
+    if (debugEnabled("sets")) {
+      debugLog("sets", "decoded", {
+        collection,
+        asked: cleaned.length,
+        first: cleaned[0],
+        refresh,
+        envelope,
+        redirects: redirects.length,
+        bytes: u8.byteLength,
+        rows,
+        elements: elements.length,
+        folded: stats.folded,
+      });
+    }
 
     return {
-      contact: peer,
-      set,
+      elements,
+      redirects,
+      ingress,
+      bytes: u8.byteLength,
+      rows,
+      folded: stats.folded,
     };
+  }
+
+  /**
+   * Compatibility alias over {@link getSets} for a single location. Prefer
+   * Network.getSet / Network.getSets — both share one `/sets` engine.
+   *
+   * @param {string} protocol
+   * @param {Peer} peer
+   * @param {string} collection
+   * @param {string} location
+   * @param {boolean} [deep=true]
+   * @returns {Promise<{ contact: Peer, set: any[] | null }>}
+   */
+  async function getSet(protocol, peer, collection, location, deep = true) {
+    const { elements, redirects } = await getSets(protocol, peer, collection, [location], {
+      deep,
+      envelope: !deep,
+    });
+
+    let contact = peer;
+    const redirect = redirects.find((r) => r.location === location);
+    if (redirect && redirect.name && redirect.port > 0) {
+      contact = new Peer(
+        redirect.name,
+        { [redirect.ip]: null },
+        redirect.port,
+        redirect.ip
+      );
+    }
+
+    // deep=false miss with a redirect and no rows mirrors JSON /set's null set.
+    if (!deep && elements.length === 0 && redirect) {
+      return { contact, set: null };
+    }
+
+    return { contact, set: elements };
   }
 
   /**
@@ -9998,13 +12698,19 @@
   exports.Local = Local;
   exports.Network = Network;
   exports.Peer = Peer;
+  exports.ROOT = ROOT;
   exports.Set = Set$1;
   exports.Space = Space;
   exports.Spherical = Spherical;
+  exports.debugEnabled = debugEnabled;
+  exports.debugLog = debugLog;
   exports.decodeUrl64 = decodeUrl64;
   exports.encodeUrl64 = encodeUrl64;
+  exports.isDirectChild = isDirectChild;
   exports.parent = parent$1;
-  exports.transform = transform;
+  exports.setDebug = setDebug;
+  exports.zoneKey = zoneKey;
+  exports.zoneKeyID = zoneKeyID;
 
   Object.defineProperty(exports, '__esModule', { value: true });
 

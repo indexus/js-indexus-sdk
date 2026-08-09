@@ -149,9 +149,19 @@ export function buildMetricsRow(columns, rowIndex, decodeRules = DEFAULT_SETS_ME
 
 /**
  * Same Abelian-shaped map as JSON `/set` payloads (`{ count, metrics }`), keyed like GetMultiple output.
+ *
+ * Rows are not unique per key. The server strips `:reference` and truncates
+ * each key to its `precision` (6), so every item deeper than that arrives as a
+ * key naming the cell it falls in, and distinct items share one. Indexing the
+ * rows by key therefore has to fold them: assigning would keep whichever row
+ * happened to come last and silently drop the rest of the cell's mass.
+ *
+ * @param {{ folded: number }} [stats] - out-param: rows absorbed into an
+ *   existing key. Non-zero means the payload was denser than its key space.
  */
-export function binaryBlocksToRawMap(blocks, decodeRules = DEFAULT_SETS_METRIC_DECODE) {
+export function binaryBlocksToRawMap(blocks, decodeRules = DEFAULT_SETS_METRIC_DECODE, stats = null) {
   const shaped = {};
+  let folded = 0;
   for (let b = 0; b < blocks.length; b++) {
     const block = blocks[b];
     const { size, keys, columns } = block;
@@ -160,12 +170,21 @@ export function binaryBlocksToRawMap(blocks, decodeRules = DEFAULT_SETS_METRIC_D
 
     for (let i = 0; i < size; i++) {
       const key = keys[i];
-      shaped[key] = {
-        count: counts[i],
-        metrics: buildMetricsRow(columns, i, decodeRules),
-      };
+      const metrics = buildMetricsRow(columns, i, decodeRules);
+      const existing = shaped[key];
+      if (!existing) {
+        shaped[key] = { count: counts[i], metrics };
+        continue;
+      }
+      folded++;
+      existing.count += counts[i];
+      for (let m = 0; m < metrics.length; m++) {
+        if (metrics[m] === undefined) continue;
+        existing.metrics[m] = (existing.metrics[m] ?? 0) + metrics[m];
+      }
     }
   }
+  if (stats) stats.folded = folded;
   return shaped;
 }
 
@@ -173,32 +192,46 @@ export function binaryBlocksToRawMap(blocks, decodeRules = DEFAULT_SETS_METRIC_D
  * Turns decoded blocks into the same `{ hash: { count, metrics } }` shape as JSON /set,
  * then reuses parseSetMap for Item vs Set constructor parity.
  */
-export function binaryBlocksToElements(collection, blocks, decodeRules = DEFAULT_SETS_METRIC_DECODE) {
-  return parseSetMap(binaryBlocksToRawMap(blocks, decodeRules), collection);
+export function binaryBlocksToElements(collection, blocks, decodeRules = DEFAULT_SETS_METRIC_DECODE, stats = null) {
+  return parseSetMap(binaryBlocksToRawMap(blocks, decodeRules, stats), collection);
 }
 
 /**
  * Splits a merged /sets payload into per-parent buckets using longest-prefix match.
  * Skip falsy parents (e.g. avoid assigning everything under "").
+ *
+ * Root (`@`) is special: child hashes are bare prefixes (`7`, `a`, …) and do
+ * **not** start with `@`. Always match non-root parents first (longest prefix),
+ * then fall back to `@` for anything still unclaimed.
  */
 export function distributeElementsByParent(parentLocations, elements) {
   const uniq = [...new Set(parentLocations)].filter(Boolean);
-  const sorted = uniq.sort((a, b) => b.length - a.length);
+  const nonRoot = uniq
+    .filter((p) => p !== "@")
+    .sort((a, b) => b.length - a.length);
+  const hasRoot = uniq.includes("@");
   /** @type {Map<string, Array<Item|Set>>} */
   const map = new Map();
-  for (let i = 0; i < sorted.length; i++) {
-    map.set(sorted[i], []);
+  for (let i = 0; i < uniq.length; i++) {
+    map.set(uniq[i], []);
   }
 
   for (let e = 0; e < elements.length; e++) {
     const el = elements[e];
     const h = el.hash();
-    for (let p = 0; p < sorted.length; p++) {
-      const parent = sorted[p];
+    if (!h || h === "@") continue;
+
+    let assigned = false;
+    for (let p = 0; p < nonRoot.length; p++) {
+      const parent = nonRoot[p];
       if (h.length > parent.length && h.startsWith(parent)) {
         map.get(parent).push(el);
+        assigned = true;
         break;
       }
+    }
+    if (!assigned && hasRoot) {
+      map.get("@").push(el);
     }
   }
 

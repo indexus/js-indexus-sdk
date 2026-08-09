@@ -1,6 +1,5 @@
 import {
   create,
-  equal,
   add,
   get,
   key,
@@ -9,6 +8,8 @@ import {
   merge,
   set,
   retrieve,
+  replaceBranch,
+  pruneDeeperThan,
 } from "./data.js";
 import { aggregate } from "./aggregation.js";
 
@@ -50,7 +51,6 @@ class Cube {
 }
 
 Cube.prototype.create = create;
-Cube.prototype.equal = equal;
 Cube.prototype.add = add;
 Cube.prototype.get = get;
 Cube.prototype.key = key;
@@ -59,6 +59,8 @@ Cube.prototype.children = children;
 Cube.prototype.set = set;
 Cube.prototype.merge = merge;
 Cube.prototype.retrieve = retrieve;
+Cube.prototype.replaceBranch = replaceBranch;
+Cube.prototype.pruneDeeperThan = pruneDeeperThan;
 
 Cube.prototype.aggregate = aggregate;
 

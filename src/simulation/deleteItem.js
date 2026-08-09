@@ -27,7 +27,6 @@ export async function deleteItem(
       id: reference,
     },
     root: root,
-    current: location,
   };
 
   try {

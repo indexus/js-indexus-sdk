@@ -1,6 +1,5 @@
 import axios from "axios";
 
-import { Space } from "../entities/space.js";
 import { Peer } from "../network/peer.js";
 import { getHostFromIP } from "../utilities/network.js";
 import { authHeaders } from "./authHeaders.js";
@@ -49,23 +48,7 @@ export async function addItem(
       }
     );
   } catch (error) {
-    const status = error?.response?.status;
-    const retryAfter = error?.response?.headers?.["retry-after"];
-    if (status === 503 && retryAfter) {
-      const ms = Math.max(1, Number(retryAfter)) * 1000;
-      await new Promise((r) => setTimeout(r, ms));
-      // One soft retry after backpressure.
-      await axios.post(
-        `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
-        requestBody,
-        {
-          headers: authHeaders({
-            "Content-Type": "application/json",
-          }),
-        }
-      );
-      return;
-    }
+    // Handle and log errors
     console.error("Error adding item to the collection:", error);
     throw error;
   }

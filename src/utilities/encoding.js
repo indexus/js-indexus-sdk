@@ -9,8 +9,12 @@ function encodeUrl64(input) {
   if (typeof input === "string") {
     // Convert string to Uint8Array
     bytes = Buffer.from(input, "utf-8");
-  } else if (input instanceof Uint8Array || Buffer.isBuffer(input)) {
+  } else if (Buffer.isBuffer(input)) {
     bytes = input;
+  } else if (input instanceof Uint8Array) {
+    // Uint8Array.toString() ignores the encoding argument — wrap the same
+    // memory in a Buffer instead of copying.
+    bytes = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
   } else {
     throw new Error("Input must be a string or Uint8Array");
   }
@@ -76,31 +80,43 @@ function charsToNumbers(str) {
   return details;
 }
 
-function parent(hash) {
-  if (hash === ROOT) {
+function parent(location) {
+  if (location === ROOT) {
     return "";
   }
-  const l = hash.length - 1;
+  const l = location.length - 1;
   if (l === 0) {
     return ROOT;
   } else {
-    return hash.substring(0, l);
+    return location.substring(0, l);
   }
 }
 
-function transform(universe, location) {
-  let key = universe;
-  if (location !== ROOT) {
-    key = location + key.substring(location.length);
+// domain.IsDirectChild: one encoding step below `location`. Rejects self-keys
+// and anything deeper, which is what keeps a traversal from looping. Every
+// character of the alphabet is an ordinary location — `-` and `_` included —
+// so nothing here may treat one of them as a marker (guarantee P4).
+function isDirectChild(location, child) {
+  if (!child || child === location) {
+    return false;
   }
+  return parent(child) === location;
+}
 
-  let id;
-  try {
-    id = decodeUrl64(key);
-  } catch (err) {
-    throw new Error(err);
+// domain.Key: a zone is a (collection, location) pair. Used wherever a zone
+// indexes a local map — the Network read cache, the Grid children cache.
+function zoneKey(collection, location) {
+  return `${collection}/${location}`;
+}
+
+// zoneKeyID: maps (collection, location) into the routing space. Note the
+// inversion — the location leads, so sibling zones of one collection stay
+// adjacent under XOR and a node owns a contiguous slice of the tree.
+function zoneKeyID(collection, location) {
+  if (location === ROOT) {
+    return decodeUrl64(collection);
   }
-  return id;
+  return decodeUrl64(location + collection.substring(location.length));
 }
 
 export {
@@ -110,5 +126,7 @@ export {
   decodeUrl64,
   charsToNumbers,
   parent,
-  transform,
+  isDirectChild,
+  zoneKey,
+  zoneKeyID,
 };
