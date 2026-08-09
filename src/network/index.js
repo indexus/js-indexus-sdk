@@ -7,8 +7,10 @@ import { Throttler } from "./throttler.js";
 import { zoneKey, zoneKeyID, encodeUrl64, parent, ROOT } from "../utilities/encoding.js";
 import { distributeElementsByParent } from "../api/decodeSetsBinary.js";
 import { SetsCoalescePool } from "./setsCoalescePool.js";
+import { ReadMetrics } from "./readMetrics.js";
 import { abelianTotal } from "../entities/abelian.js";
 import { debugEnabled, debugLog, signed } from "../utilities/debug.js";
+import { putLru, touchLru } from "../utilities/lru.js";
 
 /** @typedef {"ingress" | "direct"} ReadNavigation */
 /** @typedef {"getSet" | "getSets"} ReadMethod */
@@ -72,11 +74,17 @@ class Network extends BaseNetwork {
    * @param {{
    *   setsMaxChunkSize?: number,
    *   setsMaxParallelChunks?: number,
-   *   navigation?: ReadNavigation,
-   *   method?: ReadMethod,
-   *   refreshTtlMs?: number,
-   * }} [setsPoolOptions] - tuning for merged `/sets` batching and shared read modes.
-   */
+ *   navigation?: ReadNavigation,
+ *   method?: ReadMethod,
+ *   refreshTtlMs?: number,
+ *   meshDiscovery?: boolean,
+ *   meshDiscoveryIntervalMs?: number,
+ *   meshDiscoveryMax?: number,
+ *   gateway?: string,
+ * }} [setsPoolOptions] - tuning for merged `/sets` batching and shared read modes.
+ *   `gateway` (e.g. `http://127.0.0.1:5173/api/p2p`) routes every peer call
+ *   through one origin so the browser is not capped at ~6 sockets per node.
+ */
   constructor(
     protocol,
     api,
@@ -95,8 +103,12 @@ class Network extends BaseNetwork {
 
     this._concurrency = concurrency;
 
-    // Initialize the throttler with the specified concurrency limit
+    // Initialize the throttler with the specified concurrency limit.
+    // All wire reads (getSets / getNeighbors) take a slot here — the grid
+    // asyncPool alone was not enough: Promise.all across peers bypassed it.
     this._throttler = new Throttler(this._concurrency);
+    /** Monotonic id so getSets slots are concurrency-limited, not deduped. */
+    this._wireSeq = 0;
 
     // Session seed: the XOR-nearest peer is the read ingress, and every read
     // goes through getSets → ingressPeer(), so a session stays on one node.
@@ -106,6 +118,13 @@ class Network extends BaseNetwork {
     // re-advertising them and the ingress flaps across the whole mesh.
     this._hintRejected = new Set();
 
+    // Zone key → the peer that last answered it with data. The XOR guess does
+    // not learn from an IXS1 redirect, so without this the same zone pays the
+    // same extra hop on every read. Insertion-ordered, oldest evicted.
+    /** @type {Map<string, import("./peer.js").Peer>} */
+    this._owners = new Map();
+    this._ownersMax = 4096;
+
     // Initialize the cache with a maximum size
     this._cache = new Map();
     this._cacheSize = cacheSize;
@@ -113,6 +132,9 @@ class Network extends BaseNetwork {
     this._cacheFetchedAt = new Map();
     /** zone key → the read wave currently on the wire for that zone. */
     this._inflight = new Map();
+    this._metrics = new ReadMetrics();
+    /** @type {null | ((snap: object) => void)} */
+    this._onMetrics = null;
 
     const poolCfg =
       setsPoolOptions && typeof setsPoolOptions === "object" ? setsPoolOptions : {};
@@ -126,17 +148,49 @@ class Network extends BaseNetwork {
         ? Math.floor(poolCfg.refreshTtlMs)
         : 5000;
 
+    // Both navigations route out of `_table`, but only `direct` refills it as
+    // it reads: every IXS1 redirect names an owner. An `ingress` session never
+    // sees a redirect, so its table stays at the bootstrap hosts plus whatever
+    // the ingress hint happens to name, and the client cannot reach a node it
+    // was not handed. `/neighbors` keeps one shared table for both.
+    this._meshDiscovery = poolCfg.meshDiscovery !== false;
+    this._meshDiscoveryIntervalMs =
+      Number.isFinite(poolCfg.meshDiscoveryIntervalMs) &&
+      poolCfg.meshDiscoveryIntervalMs >= 0
+        ? Math.floor(poolCfg.meshDiscoveryIntervalMs)
+        : 30000;
+    // A node answers with everything it knows; a browser reaches far fewer
+    // than a node does, so the table is bounded rather than mesh-sized.
+    this._meshDiscoveryMax =
+      Number(poolCfg.meshDiscoveryMax) > 0
+        ? Math.floor(poolCfg.meshDiscoveryMax)
+        : 64;
+    this._meshDiscoveryAt = 0;
+    /** @type {Promise<number> | null} */
+    this._meshDiscoveryInflight = null;
+
+    // Same-origin peer gateway (dashboard `/api/p2p/:port`). Empty = dial the
+    // peer host:port directly with `_protocol`.
+    this._gateway =
+      typeof poolCfg.gateway === "string" && poolCfg.gateway.trim()
+        ? poolCfg.gateway.replace(/\/$/, "")
+        : null;
+
     this._readNavigation = normalizeNavigation(poolCfg.navigation);
     this._readMethod = normalizeMethod(poolCfg.method);
+    // Parallel HTTP waves used to be hard-capped at 16 even when the Throttler
+    // allowed 100 — that serialized fat Aggregate prefetches into many micro
+    // waves. Default parallel chunks now track concurrency; chunk size stays
+    // modest so a wrong-XOR batch does not redirect hundreds of locations.
     this._setsPoolCfg = {
       setsMaxChunkSize:
         Number(poolCfg.setsMaxChunkSize) > 0
           ? Math.floor(poolCfg.setsMaxChunkSize)
-          : 96,
+          : 128,
       setsMaxParallelChunks:
         Number(poolCfg.setsMaxParallelChunks) > 0
           ? Math.floor(poolCfg.setsMaxParallelChunks)
-          : Math.min(this._concurrency, 16),
+          : this._concurrency,
     };
     this._setsPool = this._makeSetsPool();
 
@@ -193,6 +247,8 @@ class Network extends BaseNetwork {
     this._cacheFetchedAt.clear();
     this._inflight.clear();
     this._setsPool = this._makeSetsPool();
+    this._metrics.reset();
+    this._emitMetrics();
   }
 
   setActivityHandler(handler) {
@@ -201,6 +257,46 @@ class Network extends BaseNetwork {
 
   setPeersHandler(handler) {
     this._onPeers = typeof handler === "function" ? handler : null;
+  }
+
+  setMetricsHandler(handler) {
+    this._onMetrics = typeof handler === "function" ? handler : null;
+  }
+
+  /** @returns {object} */
+  readMetrics() {
+    return this._metrics.snapshot({
+      cacheSize: this._cache.size,
+      cacheCapacity: this._cacheSize,
+      inflightZones: this._inflight.size,
+      navigation: this._readNavigation,
+      method: this._readMethod,
+      refreshTtlMs: this._refreshTtlMs,
+    });
+  }
+
+  /** Push a metrics snapshot to the Aggregate side panel. */
+  _emitMetrics() {
+    if (typeof this._onMetrics !== "function") return;
+    try {
+      this._onMetrics(this.readMetrics());
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /**
+   * Record one Aggregate reconcile pass (quiet or dirty).
+   * @param {{ dirty?: number, rootDelta?: number, ms?: number }} result
+   */
+  noteReconcile(result = {}) {
+    this._metrics.onReconcile(result);
+    this._emitMetrics();
+  }
+
+  resetReadMetrics() {
+    this._metrics.reset();
+    this._emitMetrics();
   }
 
   // Session seed in the same base64url alphabet as peer hashes, so the UI can
@@ -270,28 +366,208 @@ class Network extends BaseNetwork {
   }
 
   /**
+   * Peer hashes currently in the routing table.
+   * @returns {Set<string>}
+   */
+  _knownHashes() {
+    const known = new Set();
+    for (const peer of this._table.peers()) known.add(peer.hash());
+    return known;
+  }
+
+  /**
+   * Route one discovered contact into the table. Peers this client already
+   * failed to reach stay out: discovery answers name every node the mesh
+   * knows, including ones only reachable from inside it.
+   * @param {{ name?: string, hash?: string, ip?: string, port?: number } | import("./peer.js").Peer} contact
+   * @param {Set<string>} [known] - hashes already in the table, updated in place
+   * @returns {boolean} true when the table gained a peer
+   */
+  _insertPeer(contact, known) {
+    if (!contact) return false;
+    try {
+      const peer =
+        contact instanceof Peer
+          ? contact
+          : new Peer(
+              contact.name ?? contact.hash,
+              contact.ips ?? { [contact.ip]: null },
+              Number(contact.port),
+              contact.ip
+            );
+      const hash = peer.hash();
+      if (!hash || !peer.ip() || !(peer.port() > 0)) return false;
+      if (this._hintRejected.has(hash)) return false;
+      const seen = known ?? this._knownHashes();
+      if (seen.has(hash)) return false;
+      this._table.insert(peer.id(), peer);
+      seen.add(hash);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * A node buckets `/neighbors` against its own peer ids, so an origin of any
+   * other width falls outside every bucket and the answer comes back empty.
+   * The session key is wider than a peer id: cut it to the width of the peer
+   * being asked.
+   * @param {import("./peer.js").Peer} peer
+   * @returns {string} url64 origin
+   */
+  _discoveryOrigin(peer) {
+    const width = peer.id()?.length ?? 0;
+    if (!width || width >= this._routingKey.length) {
+      return this.routingKeyHash();
+    }
+    return encodeUrl64(this._routingKey.subarray(0, width));
+  }
+
+  /**
+   * Ask a known node for the peers nearest our session key and fold them into
+   * the routing table. One round trip, and the same table both navigations
+   * already route reads and writes from.
+   * @param {import("./peer.js").Peer | null} [from] - defaults to the ingress peer
+   * @returns {Promise<number>} peers added
+   */
+  async discoverMesh(from = null) {
+    if (typeof this._api.getNeighbors !== "function") return 0;
+    const peer = from ?? this.ingressPeer();
+    if (!peer) return 0;
+
+    let contacts;
+    try {
+      contacts = await this._enqueueWire(peer, "getNeighbors", () =>
+        this._api.getNeighbors(
+          this._protocol,
+          peer,
+          this._discoveryOrigin(peer),
+          this._wireOpts()
+        )
+      );
+    } catch {
+      // Discovery is opportunistic: a node that cannot answer is still a
+      // perfectly good ingress, so nothing is dropped from the table here.
+      return 0;
+    }
+
+    const known = this._knownHashes();
+    let added = 0;
+    for (const contact of contacts || []) {
+      if (added >= this._meshDiscoveryMax) break;
+      if (this._insertPeer(contact, known)) added++;
+    }
+    if (added > 0) this._notifyPeers();
+    return added;
+  }
+
+  /**
+   * Refresh the node table at most once per interval, off the read path.
+   */
+  _maybeDiscoverMesh() {
+    if (!this._meshDiscovery || this._meshDiscoveryInflight) return;
+    const at = Date.now();
+    if (at - this._meshDiscoveryAt < this._meshDiscoveryIntervalMs) return;
+    this._meshDiscoveryAt = at;
+    this._meshDiscoveryInflight = this.discoverMesh()
+      .catch(() => 0)
+      .finally(() => {
+        this._meshDiscoveryInflight = null;
+      });
+  }
+
+  /**
    * @param {"start"|"end"} phase
    * @param {import("./peer.js").Peer | null} peer
-   * @param {{ method: string, ok?: boolean, ms?: number, collection?: string, location?: string }} meta
+   * @param {{
+   *   method: string,
+   *   ok?: boolean,
+   *   ms?: number,
+   *   collection?: string,
+   *   location?: string,
+   *   locations?: string[],
+   *   navigation?: string,
+   *   refresh?: boolean,
+   *   deep?: boolean,
+   *   redirects?: number,
+   *   reason?: string,
+   * }} meta
    */
   _emitActivity(phase, peer, meta) {
+    const ip = meta.ip ?? (peer ? peer.ip() : null);
+    const port = meta.port ?? (peer ? peer.port() : null);
+    const hash = meta.hash ?? (peer ? peer.hash() : null);
+    const host = meta.host ?? (ip != null ? `${ip}|${port}` : null);
+
+    if (meta.method === "getSets") {
+      const locs = meta.locations ?? (meta.location ? [meta.location] : []);
+      if (phase === "start") {
+        this._metrics.onRequestStart({
+          locations: locs.length || 1,
+          peer: hash,
+        });
+      } else {
+        this._metrics.onRequestEnd({
+          ok: meta.ok !== false,
+          ms: meta.ms,
+          redirects: meta.redirects,
+        });
+        if (meta.ok !== false && Number.isFinite(meta.bytes)) {
+          this._metrics.onPayload({
+            bytes: meta.bytes,
+            wireBytes: meta.wireBytes,
+            rows: meta.rows,
+          });
+        }
+        // No push here. Counters are read on a timer by the Metrics tab;
+        // emitting per response put a main-thread React render on every
+        // request and that is what made panning stutter.
+      }
+      if (debugEnabled("sets")) {
+        debugLog(
+          "sets",
+          phase === "start" ? "wire request" : "wire response",
+          {
+            peer: hash,
+            host,
+            locations: locs,
+            navigation: meta.navigation ?? this._readNavigation,
+            refresh: meta.refresh === true,
+            deep: meta.deep,
+            ok: meta.ok,
+            ms: meta.ms,
+            redirects: meta.redirects,
+            reason: meta.reason,
+          }
+        );
+      }
+    }
+
     if (typeof this._onActivity !== "function") return;
+    const event = {
+      phase,
+      method: meta.method,
+      hash,
+      ip,
+      port,
+      host,
+      ok: meta.ok,
+      ms: meta.ms,
+      collection: meta.collection,
+      location: meta.location,
+      locations: meta.locations,
+      navigation: meta.navigation,
+      refresh: meta.refresh,
+      deep: meta.deep,
+      redirects: meta.redirects,
+      reason: meta.reason,
+      bytes: meta.bytes,
+      wireBytes: meta.wireBytes,
+      rows: meta.rows,
+    };
     try {
-      const ip = meta.ip ?? (peer ? peer.ip() : null);
-      const port = meta.port ?? (peer ? peer.port() : null);
-      const hash = meta.hash ?? (peer ? peer.hash() : null);
-      this._onActivity({
-        phase,
-        method: meta.method,
-        hash,
-        ip,
-        port,
-        host: meta.host ?? (ip != null ? `${ip}|${port}` : null),
-        ok: meta.ok,
-        ms: meta.ms,
-        collection: meta.collection,
-        location: meta.location,
-      });
+      this._onActivity(event);
     } catch {
       /* ignore */
     }
@@ -302,7 +578,15 @@ class Network extends BaseNetwork {
    * @param {import("./peer.js").Peer} peer
    * @param {string} method
    * @param {() => Promise<T>} fn
-   * @param {{ collection?: string, location?: string }} [meta]
+   * @param {{
+   *   collection?: string,
+   *   location?: string,
+   *   locations?: string[],
+   *   navigation?: string,
+   *   refresh?: boolean,
+   *   deep?: boolean,
+   *   reason?: string,
+   * }} [meta]
    * @returns {Promise<T>}
    */
   async _withActivity(peer, method, fn, meta = {}) {
@@ -311,7 +595,19 @@ class Network extends BaseNetwork {
     try {
       const result = await fn();
       const ms = now() - started;
-      this._emitActivity("end", peer, { method, ok: true, ms, ...meta });
+      const redirects = Array.isArray(result?.redirects)
+        ? result.redirects.length
+        : undefined;
+      this._emitActivity("end", peer, {
+        method,
+        ok: true,
+        ms,
+        redirects,
+        bytes: result?.bytes,
+        wireBytes: result?.wireBytes,
+        rows: result?.rows,
+        ...meta,
+      });
       return result;
     } catch (error) {
       this._emitActivity("end", peer, {
@@ -322,6 +618,28 @@ class Network extends BaseNetwork {
       });
       throw error;
     }
+  }
+
+  /**
+   * Run a peer call under the concurrency pool. Keys are unique so the
+   * Throttler only limits parallelism (zone coalescing lives in `_inflight`).
+   * @template T
+   * @param {import("./peer.js").Peer | null} peer
+   * @param {string} method
+   * @param {() => Promise<T>} fn
+   * @param {object} [meta]
+   * @returns {Promise<T>}
+   */
+  _enqueueWire(peer, method, fn, meta = {}) {
+    const key = `${method}:${peer?.hash?.() ?? "?"}:${++this._wireSeq}`;
+    return this._throttler.enqueue(key, () =>
+      this._withActivity(peer, method, fn, meta)
+    );
+  }
+
+  /** Options every API call needs when a same-origin gateway is configured. */
+  _wireOpts(extra = {}) {
+    return this._gateway ? { gateway: this._gateway, ...extra } : extra;
   }
 
   /**
@@ -349,7 +667,12 @@ class Network extends BaseNetwork {
 
     this._emitActivity("start", null, meta);
     try {
-      const peer = await this._api.pingPeer(this._protocol, ip, port);
+      const peer = await this._api.pingPeer(
+        this._protocol,
+        ip,
+        port,
+        this._wireOpts()
+      );
       this._emitActivity("end", peer, { ...meta, ok: true, ms: now() - started });
       return peer;
     } catch {
@@ -375,6 +698,13 @@ class Network extends BaseNetwork {
 
     peers.forEach((peer) => this._table.insert(peer.id(), peer));
     this._notifyPeers();
+
+    // One introduction before the first read, so a session starts with the
+    // mesh rather than with its bootstrap hosts.
+    if (this._meshDiscovery) {
+      this._meshDiscoveryAt = Date.now();
+      await this.discoverMesh();
+    }
   }
 
   /**
@@ -421,7 +751,8 @@ class Network extends BaseNetwork {
               root,
               location,
               metrics,
-              reference
+              reference,
+              this._wireOpts()
             ),
             { collection, location }
           )
@@ -520,6 +851,35 @@ class Network extends BaseNetwork {
    * @param {Set<string>} viaSet
    * @returns {import("./peer.js").Peer | null}
    */
+  /**
+   * Remember who served a zone, so the next read skips the redirect.
+   * @param {string} cacheKey
+   * @param {import("./peer.js").Peer} peer
+   */
+  _rememberOwner(cacheKey, peer) {
+    if (!peer) return;
+    putLru(this._owners, cacheKey, peer, this._ownersMax);
+  }
+
+  /**
+   * The remembered owner, when it is still a peer we hold and have not
+   * already tried on this read.
+   * @param {string} cacheKey
+   * @param {Set<string>} viaSet
+   * @returns {import("./peer.js").Peer | null}
+   */
+  _knownOwner(cacheKey, viaSet) {
+    const peer = this._owners.get(cacheKey);
+    if (!peer) return null;
+    if (viaSet && viaSet.has(peer.hash())) return null;
+    const held = this._table.nearest(peer.id());
+    if (!held || held.hash() !== peer.hash()) {
+      this._owners.delete(cacheKey);
+      return null;
+    }
+    return peer;
+  }
+
   _nearestExcluding(id, viaSet) {
     if (!viaSet || viaSet.size === 0) {
       return this._table.nearest(id);
@@ -546,13 +906,7 @@ class Network extends BaseNetwork {
    * @returns {any[] | undefined}
    */
   _touchCacheEntry(cacheKey) {
-    if (!this._cache.has(cacheKey)) {
-      return undefined;
-    }
-    const cached = this._cache.get(cacheKey);
-    this._cache.delete(cacheKey);
-    this._cache.set(cacheKey, cached);
-    return cached;
+    return touchLru(this._cache, cacheKey);
   }
 
   /**
@@ -560,12 +914,9 @@ class Network extends BaseNetwork {
    * @param {any[]} bucket
    */
   _putCacheChildren(cacheKey, bucket) {
-    if (!this._cache.has(cacheKey) && this._cache.size >= this._cacheSize) {
-      const firstKey = this._cache.keys().next().value;
-      this._cache.delete(firstKey);
-      this._cacheFetchedAt.delete(firstKey);
-    }
-    this._cache.set(cacheKey, bucket);
+    putLru(this._cache, cacheKey, bucket, this._cacheSize, (evicted) => {
+      this._cacheFetchedAt.delete(evicted);
+    });
     this._cacheFetchedAt.set(cacheKey, Date.now());
   }
 
@@ -621,6 +972,8 @@ class Network extends BaseNetwork {
       return;
     }
 
+    this._maybeDiscoverMesh();
+
     const navigation = normalizeNavigation(
       options.navigation ?? this._readNavigation
     );
@@ -652,17 +1005,31 @@ class Network extends BaseNetwork {
       }
 
       try {
-        const { elements, ingress } = await this._withActivity(
+        const { elements, ingress } = await this._enqueueWire(
           peer,
           "getSets",
           () =>
-            this._api.getSets(this._protocol, peer, collection, stillMissing, {
-              deep: true,
-              refresh,
-              envelope: false,
-              routingKey: this._routingKey,
-            }),
-          { collection, location: stillMissing[0] }
+            this._api.getSets(
+              this._protocol,
+              peer,
+              collection,
+              stillMissing,
+              this._wireOpts({
+                deep: true,
+                refresh,
+                envelope: false,
+                routingKey: this._routingKey,
+              })
+            ),
+          {
+            collection,
+            location: stillMissing[0],
+            locations: stillMissing,
+            navigation: "ingress",
+            refresh,
+            deep: true,
+            reason: "ingress-chunk",
+          }
         );
 
         this._adoptIngressHint(ingress);
@@ -680,15 +1047,17 @@ class Network extends BaseNetwork {
             status === null ? " (unreachable)" : ` (HTTP ${status})`
           }. Retrying with a different peer...`
         );
-        debugLog("sets", "peer dropped for this read", {
-          peer: peer.hash(),
-          status,
-          blacklisted: status === null,
-          locations: stillMissing.length,
-          first: stillMissing[0],
-          attemptsLeft: attempts - 1,
-          navigation: "ingress",
-        });
+        if (debugEnabled("sets")) {
+          debugLog("sets", "peer dropped for this read", {
+            peer: peer.hash(),
+            status,
+            blacklisted: status === null,
+            locations: stillMissing.length,
+            first: stillMissing[0],
+            attemptsLeft: attempts - 1,
+            navigation: "ingress",
+          });
+        }
 
         attempts--;
         if (attempts === 0) {
@@ -726,6 +1095,9 @@ class Network extends BaseNetwork {
 
       for (const [location, state] of pending) {
         let peer = state.peer;
+        if (!peer) {
+          peer = this._knownOwner(zoneKey(collection, location), state.via);
+        }
         if (!peer) {
           const id = zoneKeyID(collection, state.probe);
           peer = this._nearestExcluding(id, state.via);
@@ -774,17 +1146,31 @@ class Network extends BaseNetwork {
   async _directRound(collection, group, pending, refresh) {
     const { peer, locations, via } = group;
     try {
-      const { elements, redirects } = await this._withActivity(
+      const { elements, redirects } = await this._enqueueWire(
         peer,
         "getSets",
         () =>
-          this._api.getSets(this._protocol, peer, collection, locations, {
-            deep: false,
-            envelope: true,
-            refresh,
-            via,
-          }),
-        { collection, location: locations[0] }
+          this._api.getSets(
+            this._protocol,
+            peer,
+            collection,
+            locations,
+            this._wireOpts({
+              deep: false,
+              envelope: true,
+              refresh,
+              via,
+            })
+          ),
+        {
+          collection,
+          location: locations[0],
+          locations,
+          navigation: "direct",
+          refresh,
+          deep: false,
+          reason: "direct-round",
+        }
       );
 
       const byParent = distributeElementsByParent(locations, elements);
@@ -797,24 +1183,34 @@ class Network extends BaseNetwork {
       for (const location of locations) {
         const state = pending.get(location);
         if (!state) continue;
+        const cacheKey = zoneKey(collection, location);
         state.via.add(peer.hash());
 
         const bucket = byParent.get(location) ?? [];
         if (bucket.length > 0) {
-          if (refresh && debugEnabled("refresh")) {
-            const before = this._cache.get(zoneKey(collection, location));
-            const delta =
-              abelianTotal(bucket).count - abelianTotal(before ?? []).count;
-            if (delta !== 0) {
-              debugLog("refresh", "zone moved", {
-                location,
-                was: abelianTotal(before ?? []).count,
-                now: abelianTotal(bucket).count,
-                delta: signed(delta),
-              });
+          if (refresh) {
+            const before = this._cache.get(cacheKey);
+            // Skip "was: 0" noise from cold fills / prior invalidate — only
+            // report a real move when we had a previous cached answer.
+            if (before !== undefined) {
+              const beforeCount = abelianTotal(before).count;
+              const afterCount = abelianTotal(bucket).count;
+              const delta = afterCount - beforeCount;
+              if (delta !== 0) {
+                this._metrics.onZoneDelta(location, delta);
+                if (debugEnabled("refresh")) {
+                  debugLog("refresh", "zone moved", {
+                    location,
+                    was: beforeCount,
+                    now: afterCount,
+                    delta: signed(delta),
+                  });
+                }
+              }
             }
           }
-          this._putCacheChildren(zoneKey(collection, location), bucket);
+          this._putCacheChildren(cacheKey, bucket);
+          this._rememberOwner(cacheKey, peer);
           pending.delete(location);
           continue;
         }
@@ -822,7 +1218,7 @@ class Network extends BaseNetwork {
         const redirect = redirectByLoc.get(location);
         if (redirect && redirect.name && redirect.port > 0) {
           if (state.via.has(redirect.name)) {
-            this._putCacheChildren(zoneKey(collection, location), []);
+            this._putCacheChildren(cacheKey, []);
             pending.delete(location);
             continue;
           }
@@ -836,6 +1232,16 @@ class Network extends BaseNetwork {
             this._table.insert(next.id(), next);
             state.peer = next;
             this._notifyPeers();
+            this._metrics.onRedirectFollow();
+            if (debugEnabled("sets")) {
+              debugLog("sets", "direct redirect follow", {
+                location,
+                from: peer.hash(),
+                to: redirect.name,
+                toHost: `${redirect.ip}|${redirect.port}`,
+                via: [...state.via],
+              });
+            }
             continue;
           } catch {
             /* fall through to parent probe */
@@ -844,13 +1250,13 @@ class Network extends BaseNetwork {
 
         // Parent-key peer fallback while still requesting the original location.
         if (state.probe === ROOT) {
-          this._putCacheChildren(zoneKey(collection, location), []);
+          this._putCacheChildren(cacheKey, []);
           pending.delete(location);
           continue;
         }
         const nextProbe = parent(state.probe);
         if (!nextProbe) {
-          this._putCacheChildren(zoneKey(collection, location), []);
+          this._putCacheChildren(cacheKey, []);
           pending.delete(location);
           continue;
         }
@@ -870,12 +1276,14 @@ class Network extends BaseNetwork {
         state.via.add(peer.hash());
         state.peer = null;
       }
-      debugLog("sets", "direct peer dropped", {
-        peer: peer.hash(),
-        status,
-        locations: locations.length,
-        first: locations[0],
-      });
+      if (debugEnabled("sets")) {
+        debugLog("sets", "direct peer dropped", {
+          peer: peer.hash(),
+          status,
+          locations: locations.length,
+          first: locations[0],
+        });
+      }
     }
   }
 
@@ -890,17 +1298,20 @@ class Network extends BaseNetwork {
     for (let i = 0; i < locations.length; i++) {
       const location = locations[i];
       const bucket = byParent.get(location) ?? [];
-      if (refresh && debugEnabled("refresh")) {
-        const before = this._cache.get(zoneKey(collection, location));
+      const before = this._cache.get(zoneKey(collection, location));
+      if (refresh && before !== undefined) {
         const delta =
-          abelianTotal(bucket).count - abelianTotal(before ?? []).count;
+          abelianTotal(bucket).count - abelianTotal(before).count;
         if (delta !== 0) {
-          debugLog("refresh", "zone moved", {
-            location,
-            was: abelianTotal(before ?? []).count,
-            now: abelianTotal(bucket).count,
-            delta: signed(delta),
-          });
+          this._metrics.onZoneDelta(location, delta);
+          if (debugEnabled("refresh")) {
+            debugLog("refresh", "zone moved", {
+              location,
+              was: abelianTotal(before).count,
+              now: abelianTotal(bucket).count,
+              delta: signed(delta),
+            });
+          }
         }
       }
       this._putCacheChildren(zoneKey(collection, location), bucket);
@@ -943,6 +1354,8 @@ class Network extends BaseNetwork {
     }
 
     const refresh = options.refresh === true;
+    // Re-read without deleting the cache entry first (so zone deltas are real).
+    const force = options.force === true;
     const navigation = normalizeNavigation(
       options.navigation ?? this._readNavigation
     );
@@ -952,6 +1365,8 @@ class Network extends BaseNetwork {
     const result = new Map();
 
     const missingForFetch = [];
+    const cachedHits = [];
+    const ttlHits = [];
     const now = Date.now();
 
     for (const location of uniqInput) {
@@ -963,17 +1378,26 @@ class Network extends BaseNetwork {
       // not start with `@` (handled in distributeElementsByParent).
       const cacheKey = zoneKey(collection, location);
       const cached = this._touchCacheEntry(cacheKey);
-      if (
-        cached === undefined ||
-        (refresh && !this._refreshWithinTtl(cacheKey, now))
-      ) {
+      if (cached === undefined) {
+        missingForFetch.push(location);
+      } else if (refresh && (force || !this._refreshWithinTtl(cacheKey, now))) {
         missingForFetch.push(location);
       } else {
+        if (refresh) ttlHits.push(location);
+        else cachedHits.push(location);
         result.set(location, Array.isArray(cached) ? cached : []);
       }
     }
 
+    if (cachedHits.length) this._metrics.onCacheHit(cachedHits.length);
+    if (ttlHits.length) {
+      this._metrics.onCacheHit(ttlHits.length, { ttl: true });
+    }
+
     if (missingForFetch.length === 0) {
+      // Cache hits are counted in metrics — do not log or push per call. A pan
+      // over warm zones is nothing but this branch, and pushing a snapshot
+      // here re-rendered the side panel on every cached read.
       return result;
     }
 
@@ -985,6 +1409,7 @@ class Network extends BaseNetwork {
       const inflight = this._inflight.get(zoneKey(collection, location));
       if (inflight && (inflight.refresh || !refresh)) {
         joined.push(inflight.promise);
+        this._metrics.onCoalescedJoin(1);
       } else {
         toFetch.push(location);
       }

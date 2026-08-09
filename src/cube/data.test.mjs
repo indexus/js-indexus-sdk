@@ -61,6 +61,46 @@ describe("cube.set Abelian patch", () => {
     assert.equal(cell.children[0], childXyz);
   });
 
+  it("ignores float drift when the count is unchanged", () => {
+    // The same items, folded in a different child order. On DVF-scale prices
+    // the two sums part company around 1e-7 — well past the 1e-9 tolerance
+    // abelianEqual allows — so comparing metrics patched the cell and rolled
+    // an epsilon up to the root on every delivery, for every cell that had a
+    // subtree. Only the count says whether anything actually moved.
+    const prices = [];
+    let seed = 12345;
+    for (let i = 0; i < 4000; i++) {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      seed = Math.abs(seed);
+      prices.push(50000 + (seed % 900000) + (seed % 997) / 997);
+    }
+    const local = prices.reduce((a, b) => a + b, 0);
+    const remote = [...prices].reverse().reduce((a, b) => a + b, 0);
+    assert.ok(
+      Math.abs(local - remote) > 1e-9,
+      `fixture must drift past the abelianEqual tolerance, got ${Math.abs(local - remote)}`
+    );
+
+    const cube = makeCubeHarness();
+    const parentXyz = { resolution: 0, coordinates: [0, 0] };
+    const cellXyz = { resolution: 1, coordinates: [0, 0] };
+    cube.add(create(parentXyz, { id: "parent" }, 4000, [local], undefined, [cellXyz]));
+    cube.add(
+      create(cellXyz, { id: "cell" }, 4000, [local], undefined, [
+        { resolution: 2, coordinates: [0, 0] },
+      ])
+    );
+
+    cube.set([create(cellXyz, { id: "cell" }, 4000, [remote], undefined, [])]);
+
+    assert.equal(cube.get(cellXyz).metrics[0], local, "cell must not be patched");
+    assert.equal(
+      cube.get(parentXyz).metrics[0],
+      local,
+      "no epsilon may roll up to the ancestors"
+    );
+  });
+
   it("patches count/metrics but keeps children when Abelian differs", () => {
     const cube = makeCubeHarness();
     cube.add(

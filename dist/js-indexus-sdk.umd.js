@@ -2147,6 +2147,79 @@
     return host;
   }
 
+  /**
+   * Filter + locate children from a network response, then hand them to `addSet`.
+   * Shared by single-parent getSet and multi-parent getSets waves.
+   *
+   * @param {import("../entities/set.js").Set} parentSet
+   * @param {Array<import("../entities/set.js").Set | import("../entities/item.js").Item>} elements
+   * @param {(el: any) => void} addSet
+   */
+  function ingestChildren(parentSet, elements, addSet) {
+    const space = this.spaces[parentSet.collection()];
+    const list = Array.isArray(elements) ? elements : [];
+
+    for (const element of list) {
+      if (!this.addLocation(space, element)) {
+        this.monitoring.send(
+          new Monitoring(this.level + 1, State.Filtered, element)
+        );
+        continue;
+      }
+
+      addSet(element);
+      this.monitoring.send(
+        new Monitoring(this.level + 1, State.Indexed, element)
+      );
+    }
+  }
+
+  async function getSet$1(set, addSet) {
+    if (set instanceof Item$2) {
+      addSet(set);
+      this.monitoring.send(new Monitoring(this.level + 1, State.Indexed, set));
+      return;
+    }
+
+    const elements = await this.network.getSet(set.collection(), set.hash());
+    ingestChildren.call(this, set, elements, addSet);
+  }
+
+  function addLocation(space, element) {
+    const location = [];
+    const distances = [];
+    const directions = [];
+    let overall = 0;
+    let active = true;
+
+    const segments = space.decode(element.hash());
+
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i];
+      location.push(segment);
+      const dimension = space.dimension(i);
+      const origin = this.options.origins[dimension.name()];
+      const filter = this.options.filters[dimension.name()];
+
+      const distance = dimension.segmentDistance(origin, segment);
+      distances.push(distance);
+
+      const direction = dimension.segmentDirection(origin, segment);
+      directions.push(direction);
+
+      overall += distance / dimension.ratio() / segments.length;
+
+      active =
+        active &&
+        dimension.filterDirection(filter, direction) &&
+        dimension.filterDistance(filter, distance);
+    }
+
+    element.locate(location, distances, directions, overall);
+
+    return active;
+  }
+
   async function run() {
     if (this.prepare()) {
       if (this.current().final) {
@@ -2224,6 +2297,13 @@
     return predicted >= this.limit || layer.radius === this.first().radius;
   }
 
+  /**
+   * Fetch children for every selected parent.
+   *
+   * When Network method is `getSets`, warm all parents of a collection in one
+   * multi-location wave (same spirit as Grid.prefetchBatchSets), then ingest
+   * from the returned map. `getSet` mode keeps per-parent asyncPool.
+   */
   async function query() {
     const selectedList = this.current().selected.list;
     // Always allocate the next layer up-front. Empty getSet responses (missing
@@ -2231,27 +2311,95 @@
     // then level++ into an undefined layer.
     this.next();
 
-    // Define the iterator function for each element
-    const process = async (element) => {
+    const method = this.network?.readOptions?.()?.method ?? "getSets";
+    const useBatch =
+      method === "getSets" && typeof this.network?.getSets === "function";
+
+    if (useBatch) {
+      await queryBatchSets.call(this, selectedList);
+    } else {
+      const process = async (element) => {
+        try {
+          await this.getSet(element, (set) => {
+            this.next().indexed.add(set);
+          });
+          this.monitoring.send(new Monitoring(this.level, State.Loaded, element));
+        } catch (error) {
+          console.error(
+            `Failed to retrieve set for ${element.collection()}:`,
+            error
+          );
+        }
+      };
+      await asyncPool(this.network.getConcurrency(), selectedList, process);
+    }
+
+    this.current().loaded.concat(this.current().selected.list);
+    this.current().selected.clear();
+  }
+
+  /**
+   * @param {Array<import("../entities/set.js").Set | import("../entities/item.js").Item>} selectedList
+   */
+  async function queryBatchSets(selectedList) {
+    /** @type {Array<import("../entities/item.js").Item>} */
+    const items = [];
+    /** @type {Map<string, Array<import("../entities/set.js").Set>>} */
+    const parentsByColl = new Map();
+
+    for (const element of selectedList) {
+      if (element instanceof Item$2) {
+        items.push(element);
+        continue;
+      }
+      const collection = element.collection();
+      if (!parentsByColl.has(collection)) {
+        parentsByColl.set(collection, []);
+      }
+      parentsByColl.get(collection).push(element);
+    }
+
+    for (const item of items) {
       try {
-        await this.getSet(element, (set) => {
+        await this.getSet(item, (set) => {
           this.next().indexed.add(set);
         });
-
-        this.monitoring.send(new Monitoring(this.level, State.Loaded, element));
+        this.monitoring.send(new Monitoring(this.level, State.Loaded, item));
       } catch (error) {
         console.error(
-          `Failed to retrieve set for ${element.collection()}:`,
+          `Failed to retrieve set for ${item.collection()}:`,
           error
         );
       }
-    };
+    }
 
-    await asyncPool(this.network.getConcurrency(), selectedList, process);
+    for (const [collection, parents] of parentsByColl) {
+      const hashes = parents.map((p) => p.hash());
+      let map;
+      try {
+        map = await this.network.getSets(collection, hashes);
+      } catch (error) {
+        console.error(`Failed to retrieve sets for ${collection}:`, error);
+        continue;
+      }
 
-    // After all promises are resolved
-    this.current().loaded.concat(this.current().selected.list);
-    this.current().selected.clear();
+      for (const parent of parents) {
+        try {
+          const elements = map.get(parent.hash()) || [];
+          ingestChildren.call(this, parent, elements, (set) => {
+            this.next().indexed.add(set);
+          });
+          this.monitoring.send(
+            new Monitoring(this.level, State.Loaded, parent)
+          );
+        } catch (error) {
+          console.error(
+            `Failed to ingest set for ${parent.collection()}:`,
+            error
+          );
+        }
+      }
+    }
   }
 
   function stream() {
@@ -2271,67 +2419,6 @@
 
     this.current().selected.remove(length, length);
     this.output.send(result);
-  }
-
-  async function getSet$1(set, addSet) {
-    if (set instanceof Item$2) {
-      addSet(set);
-      this.monitoring.send(new Monitoring(this.level + 1, State.Indexed, set));
-      return;
-    }
-
-    const space = this.spaces[set.collection()];
-    const elements = await this.network.getSet(set.collection(), set.hash());
-
-    for (const element of elements) {
-      if (!this.addLocation(space, element)) {
-        this.monitoring.send(
-          new Monitoring(this.level + 1, State.Filtered, element)
-        );
-        continue;
-      }
-
-      addSet(element);
-      this.monitoring.send(
-        new Monitoring(this.level + 1, State.Indexed, element)
-      );
-    }
-  }
-
-  function addLocation(space, element) {
-    const location = [];
-    const distances = [];
-    const directions = [];
-    let overall = 0;
-    let active = true;
-
-    const segments = space.decode(element.hash());
-
-    for (let i = 0; i < segments.length; i++) {
-      const segment = segments[i];
-      location.push(segment);
-
-      const dimension = space.dimension(i);
-      const origin = this.options.origins[dimension.name()];
-      const filter = this.options.filters[dimension.name()];
-
-      const distance = dimension.segmentDistance(origin, segment);
-      distances.push(distance);
-
-      const direction = dimension.segmentDirection(origin, segment);
-      directions.push(direction);
-
-      overall += distance / dimension.ratio() / segments.length;
-
-      active =
-        active &&
-        dimension.filterDirection(filter, direction) &&
-        dimension.filterDistance(filter, distance);
-    }
-
-    element.locate(location, distances, directions, overall);
-
-    return active;
   }
 
   class Local {
@@ -2771,6 +2858,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return new GpuOverlapAccelerator(options);
   }
 
+  /** Touch an existing Map entry and move it to the LRU tail. */
+  function touchLru(map, key) {
+    if (!map.has(key)) return undefined;
+    const value = map.get(key);
+    map.delete(key);
+    map.set(key, value);
+    return value;
+  }
+
+  /**
+   * Put an entry at the LRU tail and evict the oldest key when full.
+   * `onEvict` keeps parallel metadata maps in sync.
+   */
+  function putLru(map, key, value, maxSize, onEvict = null) {
+    if (map.has(key)) map.delete(key);
+    if (map.size >= maxSize) {
+      const oldest = map.keys().next().value;
+      map.delete(oldest);
+      onEvict?.(oldest);
+    }
+    map.set(key, value);
+  }
+
   /**
    * The (count, metrics) mass a Set carries — go-indexus-core domain.Abelian.
    *
@@ -2807,19 +2917,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return [];
   }
 
-  /** domain.Abelian.IsEqual, with the float tolerance a decoded payload needs. */
-  function abelianEqual(a, b, eps = 1e-9) {
+  /**
+   * Count-only comparison, for deciding whether a zone drifted.
+   *
+   * A metric cannot move without an item entering or leaving a set, so the count
+   * already reports every real change — and it is an exact integer. The metrics
+   * are floats the local tree folded in a different child order than the node
+   * did, so they differ in the low bits on essentially every zone: comparing them
+   * declared the whole tree dirty on each pass.
+   */
+  function abelianCountEqual(a, b) {
     if (a == null || b == null) return a === b;
-
-    if (abelianCount(a) !== abelianCount(b)) return false;
-
-    const ma = abelianMetrics(a);
-    const mb = abelianMetrics(b);
-    if (ma.length !== mb.length) return false;
-    for (let i = 0; i < ma.length; i++) {
-      if (Math.abs(ma[i] - mb[i]) > eps) return false;
-    }
-    return true;
+    return abelianCount(a) === abelianCount(b);
   }
 
   /**
@@ -2890,18 +2999,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    * number can be traced to the step that produced it: what the wire carried,
    * what survived decoding, and what the refresh pass actually changed.
    *
-   * Off by default. Enable from the console or from INIT:
+   * Off by default. Enable from the console (main thread) or from INIT:
    *
-   *   __INDEXUS_DEBUG__ = true            // every channel
-   *   __INDEXUS_DEBUG__ = "sets,refresh"  // pick channels
+   *   __INDEXUS_DEBUG__ = true                 // every channel
+   *   __INDEXUS_DEBUG__ = "sets,refresh,reconcile"
+   *
+   * In a Web Worker the main-thread global is a different realm. Aggregate
+   * passes `debugSdk` on INIT, and the worker mirrors each line back to the
+   * page console via `setDebugSink` → `DEBUG_LOG`.
    */
 
-  /** @typedef {"sets" | "refresh" | "cube"} Channel */
+  /** @typedef {"sets" | "refresh" | "cube" | "reconcile"} Channel */
 
-  const CHANNELS = ["sets", "refresh", "cube"];
+  const CHANNELS = ["sets", "refresh", "cube", "reconcile"];
 
   /** @type {Set<string> | null} — null means "not configured, read the global". */
   let enabled = null;
+
+  /** @type {null | ((channel: string, event: string, fields?: object) => void)} */
+  let sink = null;
 
   function fromGlobal() {
     const raw = globalThis.__INDEXUS_DEBUG__;
@@ -2931,6 +3047,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   /**
+   * Optional fan-out used by the Aggregate worker to mirror lines into the
+   * page DevTools console (worker `console` is a separate realm).
+   * @param {null | ((channel: string, event: string, fields?: object) => void)} fn
+   */
+  function setDebugSink(fn) {
+    sink = typeof fn === "function" ? fn : null;
+  }
+
+  /**
    * @param {Channel} channel
    * @returns {boolean}
    */
@@ -2948,11 +3073,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    */
   function debugLog(channel, event, fields) {
     if (!debugEnabled(channel)) return;
-    if (fields === undefined) {
-      console.info(`[indexus:${channel}] ${event}`);
+    // When a sink mirrors into the page console (Aggregate worker → DEBUG_LOG),
+    // skip the local console — otherwise every line appears twice in DevTools.
+    if (sink) {
+      try {
+        sink(channel, event, fields);
+      } catch {
+        /* never let diagnostics break a read */
+      }
       return;
     }
-    console.info(`[indexus:${channel}] ${event}`, fields);
+    if (fields === undefined) {
+      console.info(`[indexus:${channel}] ${event}`);
+    } else {
+      console.info(`[indexus:${channel}] ${event}`, fields);
+    }
   }
 
   /** Signed number, so a delta reads as a delta rather than as a value. */
@@ -3075,10 +3210,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (!existing || !hasSubtree) {
         if (trace) trace.fresh++;
         this.add(element);
-      } else if (!abelianEqual(existing, element)) {
+      } else if (!abelianCountEqual(existing, element)) {
         // Remote Abelian drifted during inserts: patch mass + adopt remote
         // children links when the payload carries them (reconcile drill).
         // Otherwise keep the live drilled children[]. Ancestor rollup via delta.
+        //
+        // Drift is the count, never the metrics: this cell folded its mass in
+        // the order it was drilled and the node folded it in another, so the
+        // sums differ in the low bits on essentially every cell that already
+        // has a subtree. Comparing them patched every such cell on every
+        // delivery and rolled a float epsilon up to the root each time.
         const previousCount = abelianCount(existing);
         const previousMetrics = abelianMetrics(existing);
         const count = abelianCount(element);
@@ -3110,7 +3251,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
           abelianSubtract(metrics.slice(), previousMetrics)
         );
       } else if (trace) {
-        // Abelian equal + existing subtree → keep local tree (no churn)
+        // Same count + existing subtree → keep local tree (no churn)
         trace.unchanged++;
       }
 
@@ -3296,6 +3437,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   const DEFAULT_RECONCILE_MAX_PARENTS = 48;
+  const DEFAULT_RECONCILE_MAX_READS = 256;
 
   function project(zoom, bounds) {
     const result = [];
@@ -3320,13 +3462,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (let z = 0; z <= zoomMax; z++) {
       let boundsAtZoom = currentBounds;
-
-      // if (z < currentZoom) {
-      //   const steps = currentZoom - z;
-      //   for (let s = 0; s < steps; s++) {
-      //     boundsAtZoom = this.space.extend(boundsAtZoom, 0.5);
-      //   }
-      // }
 
       if (z > currentZoom) {
         const steps = z - currentZoom;
@@ -3365,6 +3500,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       return;
     }
 
+    // himo.place: viewport-ranked serial chunks (near rings warm the cache first).
     const spatialPrefetch = network.spatialPrefetch !== false;
     const spatialChunkSize = Number.isFinite(network.spatialPrefetchChunkSize)
       ? Math.max(4, Math.floor(network.spatialPrefetchChunkSize))
@@ -3380,8 +3516,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (element._items) continue;
       const collection = element._collection;
       const location = element._hash;
-      if (!location) continue;
-      // Prefetch ROOT `@` too — Aggregate starts drilling there.
+      // himo: skip ROOT — process() fetches `@` on the drill path.
+      if (!location || location === ROOT) continue;
       if (this.cache.has(zoneKey(collection, location))) continue;
       if (!byColl.has(collection)) {
         byColl.set(collection, new NativeSet());
@@ -3413,8 +3549,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   /**
-   * Viewport-first: sort parent hashes by overlap with `viewportBounds`, then center distance;
-   * prefetch sequentially in chunks so nearer rings populate the Network cache before farther ones.
+   * Viewport-first (himo.place): sort by overlap then center distance; prefetch
+   * chunks sequentially so nearer rings populate the Network cache before
+   * farther ones.
    */
   async function prefetchCollectionSpatialChunks(
     net,
@@ -3516,14 +3653,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (!list[i]._items) total++;
       }
 
-      this.monitoring.send(
-        new Monitoring(current, State.Refresh, {
-          id: id,
-          depth: current,
-          bounds: bounds[current],
-          size: total,
-        })
-      );
+      if (this.monitoring?.enabled !== false) {
+        this.monitoring.send(
+          new Monitoring(current, State.Refresh, {
+            id: id,
+            depth: current,
+            bounds: bounds[current],
+            size: total,
+          })
+        );
+      }
 
       if (id === this.current.id) {
         if (selected.length > 0 && current < depth) {
@@ -3584,10 +3723,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    * @param {string} collection
    * @param {string} location
    * @param {boolean} [refresh]
+   * @param {boolean} [force]
    * @returns {Promise<any[]>}
    */
-  async function fetchChildren(net, collection, location, refresh = false) {
-    const children = await fetchChildrenOf(net, collection, [location], refresh);
+  async function fetchChildren(net, collection, location, refresh = false, force = false) {
+    const children = await fetchChildrenOf(
+      net,
+      collection,
+      [location],
+      refresh,
+      force
+    );
     const own = children?.get?.(location);
     return Array.isArray(own) ? own : [];
   }
@@ -3600,12 +3746,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    * @param {string[]} locations
    * @param {boolean} [refresh] - the reconcile pass sets it: dropping our own
    *   cache re-reads the node's, which is the copy that went stale.
+   * @param {boolean} [force] - also skip the Network refresh floor. Reserved for
+   *   an explicit user refresh: deriving it from `refresh` put every automatic
+   *   pass back on the wire and made the floor unreachable.
    */
-  async function fetchChildrenOf(net, collection, locations, refresh = false) {
+  async function fetchChildrenOf(
+    net,
+    collection,
+    locations,
+    refresh = false,
+    force = false
+  ) {
     if (!net || typeof net.getSets !== "function") {
       return new Map();
     }
-    return net.getSets(collection, locations.filter(Boolean), { refresh });
+    // Neither flag deletes the cache entry, so a re-read still has the previous
+    // answer to diff against — no fake was:0 deltas.
+    return net.getSets(collection, locations.filter(Boolean), { refresh, force });
   }
 
   async function process$1(element) {
@@ -3838,19 +3995,56 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    * captured: the DFS below rewrites cube branches as it unwinds, and closures
    * hid which step had touched what.
    *
+   * `keepResolution` matches Aggregate `pruneDeeperThan(z+1)`: never materialize
+   * cells the next prune would delete (that fight is the 10s `/sets` storm).
+   *
    * @typedef {{
    *   grid: any,
    *   cube: import("../cube/index.js").Cube,
    *   collection: string,
    *   bounds: any,
    *   maxDepth: number,
+   *   keepResolution: number,
    *   maxReplaces: number,
+   *   maxReads: number,
+   *   shouldStop: (() => boolean) | null,
+   *   digConcurrencyCap: number | null,
+   *   force: boolean,
    *   replaced: string[],
    *   visiting: globalThis.Set<string>,
    *   dirty: number,
+   *   mutated: boolean,
    *   read: number,
    * }} Reconcile
    */
+
+  /**
+   * Whether the walk must stop descending: either it spent its read budget, or
+   * the caller signals the camera moved. A repair walk is a background task; it
+   * must never turn into a full-tree crawl that starves the interactive `move`
+   * drill of its share of the peer connections. Cells already written stay —
+   * stopping early only forfeits the rest of the tree until the next pass.
+   */
+  /**
+   * Same pool the interactive drill uses, so both share one budget. Without a
+   * pool the ring goes out whole, which is what `refresh` does too.
+   *
+   * `digConcurrencyCap` (delta tick) keeps the repair to a sliver of the pool:
+   * a pan that starts mid-pass finds the `/sets` slots free instead of queued
+   * behind background reads. The manual Refresh passes no cap.
+   */
+  function digConcurrency(pass, count) {
+    const net = pass.grid?.network;
+    const requested =
+      typeof net?.getConcurrency === "function" ? net.getConcurrency() : count;
+    const base = Math.max(1, Math.floor(requested) || count);
+    return pass.digConcurrencyCap ? Math.min(base, pass.digConcurrencyCap) : base;
+  }
+
+  function walkStopped(pass) {
+    if (pass.read >= pass.maxReads) return true;
+    return pass.shouldStop ? pass.shouldStop() === true : false;
+  }
 
   function locationDepth(location) {
     return location === ROOT ? 0 : location.length;
@@ -3866,11 +4060,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return pass.replaced.some((replaced) => covers(replaced, location));
   }
 
-  function invalidate(pass, location) {
-    pass.grid.invalidate(pass.collection, location);
-    pass.grid.network.invalidate(pass.collection, location);
-  }
-
   function overlapsViewport(pass, location) {
     const { grid, bounds } = pass;
     if (!bounds || !grid?.space?.overlap) return true;
@@ -3881,24 +4070,49 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
+  function xyzResolution(xyz) {
+    return Number(xyz?.resolution) || 0;
+  }
+
+  /** Cells finer than the Aggregate display band are intentionally absent. */
+  function withinKeepBand(pass, xyz) {
+    return xyzResolution(xyz) <= pass.keepResolution;
+  }
+
+  /**
+   * Remote set children we are willing to materialize: in viewport and not past
+   * the prune keep band.
+   */
+  function materialChildSets(pass, location, children) {
+    return remoteSetChildren(location, children).filter((child) => {
+      if (!overlapsViewport(pass, child.location)) return false;
+      try {
+        return withinKeepBand(pass, pass.grid.getGeometry(child.location).xyz);
+      } catch {
+        return false;
+      }
+    });
+  }
+
   /**
    * Walk `location` down `remaining` steps of Set children, appending detached
    * cells to `cells`. Items fold into their parent's Abelian.
+   * Stops at {@link Reconcile.keepResolution} so shadow fill cannot outrun prune.
    */
   async function walkShadow(pass, location, geometry, remaining, cells) {
-    invalidate(pass, location);
-
     let children = [];
     try {
       children = await fetchChildren(
         pass.grid.network,
         pass.collection,
         location,
-        true
+        true,
+        pass.force
       );
     } catch (error) {
       console.warn("[aggregate.reconcile] shadow getSets failed:", location, error);
     }
+    pass.read += 1;
 
     const remote = abelianTotal(children);
     const links = [];
@@ -3914,9 +4128,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       )
     );
 
-    if (remaining <= 0) return;
+    const atKeepFloor = xyzResolution(geometry.xyz) >= pass.keepResolution;
+    if (remaining <= 0 || atKeepFloor || walkStopped(pass)) return;
 
-    const sets = remoteSetChildren(location, children);
+    const sets = materialChildSets(pass, location, children);
+    if (sets.length === 0) return;
+
     const geometries = sets.map((child) => pass.grid.getGeometry(child.location));
     for (let i = 0; i < geometries.length; i++) {
       links.push(geometries[i].xyz);
@@ -3927,7 +4144,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       pass.grid.network,
       pass.collection,
       sets.map((child) => child.location),
-      true
+      true,
+      pass.force
     );
     for (let i = 0; i < sets.length; i++) {
       await walkShadow(pass, sets[i].location, geometries[i], remaining - 1, cells);
@@ -3941,15 +4159,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     const geometry = pass.grid.getGeometry(location);
+    // At most one step past the current hash depth, and never past keep LOD.
+    const depthBudget = Math.max(0, pass.maxDepth - locationDepth(location));
     const cells = [];
     try {
-      await walkShadow(
-        pass,
-        location,
-        geometry,
-        Math.max(1, pass.maxDepth - locationDepth(location)),
-        cells
-      );
+      await walkShadow(pass, location, geometry, depthBudget, cells);
     } catch (error) {
       console.warn("[aggregate.reconcile] shadow branch failed:", location, error);
       return false;
@@ -3960,22 +4174,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     pass.cube.current = {};
     pass.replaced.push(location);
     pass.dirty += 1;
+    pass.mutated = true;
     return true;
   }
 
   /**
    * Rewrite the parent cell from remote children plus the cube kids already
    * installed. Unlike replaceBranch on the parent, this keeps child subtrees.
+   * Missing viewport children become shallow leaves (no deep shadow drill).
    */
   function recalculateParent(pass, location, children) {
     try {
       const remote = abelianTotal(children);
       const links = [];
 
-      const sets = remoteSetChildren(location, children);
+      const sets = materialChildSets(pass, location, children);
       for (let i = 0; i < sets.length; i++) {
         const child = sets[i];
-        if (!overlapsViewport(pass, child.location)) continue;
         const childGeometry = pass.grid.getGeometry(child.location);
         const cell = pass.cube.get(childGeometry.xyz);
         if (cell) {
@@ -4009,6 +4224,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         )
       );
       pass.cube.current = {};
+      pass.mutated = true;
     } catch (error) {
       console.warn(
         "[aggregate.reconcile] recalculate parent failed:",
@@ -4023,6 +4239,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    * `prefetched` skips the on-wire read when the caller already holds this
    * location's children (the root probe in {@link reconcileVisible}).
    *
+   * Missing siblings are shallow-inserted by {@link recalculateParent}; only
+   * mass-drifted children are dug. Deep {@link replaceBranchAt} on every miss
+   * was refilling tiers that Aggregate prune deletes each pass.
+   *
    * @param {Reconcile} pass
    * @param {string} location
    * @param {any[] | null} [prefetched]
@@ -4030,6 +4250,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    */
   async function dig(pass, location, prefetched = null) {
     if (pass.dirty >= pass.maxReplaces) return false;
+    if (!Array.isArray(prefetched) && walkStopped(pass)) return false;
     if (pass.visiting.has(location) || alreadyReplaced(pass, location)) {
       return false;
     }
@@ -4043,7 +4264,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             pass.grid.network,
             pass.collection,
             location,
-            true
+            true,
+            pass.force
           );
         } catch (error) {
           console.warn("[aggregate.reconcile] getSets failed:", location, error);
@@ -4056,55 +4278,88 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       const local =
         pass.cube.get(geometry.xyz) ??
         create(geometry.xyz, geometry.bounds, 0, [], undefined, [], location);
+      const remoteTotal = abelianTotal(children);
 
-      // Clean means both: the same mass, and the same children under it. Equal
-      // mass alone hides a sibling that arrived while another one left.
-      if (abelianEqual(local, abelianTotal(children))) {
+      // Display-band floor: count only. Finer set membership is prune's job.
+      if (xyzResolution(geometry.xyz) >= pass.keepResolution) {
+        if (abelianCountEqual(local, remoteTotal)) return false;
+        pass.cube.add(
+          create(
+            geometry.xyz,
+            geometry.bounds,
+            remoteTotal.count,
+            remoteTotal.metrics,
+            local.items,
+            [],
+            location
+          )
+        );
+        pass.cube.current = {};
+        pass.mutated = true;
+        return true;
+      }
+
+      // Membership only among children we keep — finer remote sets are noise.
+      const materialRemote = materialChildSets(pass, location, children).map(
+        (child) => child.set
+      );
+      if (abelianCountEqual(local, remoteTotal)) {
+        const localKeep = {
+          ...local,
+          children: (Array.isArray(local.children) ? local.children : []).filter(
+            (xyz) => withinKeepBand(pass, xyz)
+          ),
+        };
         const drift = childrenMembershipDrift(
-          local,
-          children,
+          localKeep,
+          materialRemote,
           pass.cube,
           pass.grid.space
         );
         if (!drift) return false;
       }
 
-      const sets = remoteSetChildren(location, children).filter((child) =>
-        overlapsViewport(pass, child.location)
-      );
+      const sets = materialChildSets(pass, location, children);
 
       if (locationDepth(location) >= pass.maxDepth || sets.length === 0) {
+        // Prefer a shallow parent rewrite over a deep shadow: at the dig floor
+        // the Abelian on `children` is enough for the display band.
+        if (sets.length === 0) {
+          if (abelianCountEqual(local, remoteTotal)) return false;
+          recalculateParent(pass, location, children);
+          return true;
+        }
         return replaceBranchAt(pass, location);
       }
 
-      /** Children the cube never saw, and children whose mass drifted. */
-      const missing = [];
+      /** Children whose count drifted — descend. Missing ones stay shallow. */
       const drifted = [];
       for (let i = 0; i < sets.length; i++) {
         const child = sets[i];
         const cell = pass.cube.get(pass.grid.getGeometry(child.location).xyz);
-        if (!cell) {
-          missing.push(child.location);
-        } else if (!abelianEqual(cell, child.set)) {
+        if (cell && !abelianCountEqual(cell, child.set)) {
           drifted.push(child.location);
         }
       }
 
       // Descend one level at a time: only the dirty sibling ring is read next.
-      // Their `/sets` answers carry the next Abelian delta, same as `@` did.
-      const stale = [...missing, ...drifted];
-      if (stale.length > 0) {
-        for (let i = 0; i < stale.length; i++) {
-          invalidate(pass, stale[i]);
-        }
-        await fetchChildrenOf(pass.grid.network, pass.collection, stale, true);
+      // No invalidate — a refresh re-reads while keeping prior cache for deltas.
+      if (drifted.length > 0) {
+        await fetchChildrenOf(
+          pass.grid.network,
+          pass.collection,
+          drifted,
+          true,
+          pass.force
+        );
 
-        for (let i = 0; i < missing.length; i++) {
-          await replaceBranchAt(pass, missing[i]);
-        }
-        for (let i = 0; i < drifted.length; i++) {
-          await dig(pass, drifted[i]);
-        }
+        // Sibling subtrees are disjoint, so they go on the wire together. Awaiting
+        // them one at a time cost read-count × round-trip and made the repair long
+        // enough to overlap the interactive drill it is supposed to stay behind.
+        await asyncPool(digConcurrency(pass, drifted.length), drifted, async (child) => {
+          if (walkStopped(pass)) return;
+          await dig(pass, child);
+        });
       }
 
       // Refresh this parent from remote whatever happened below. Never
@@ -4117,27 +4372,40 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   /**
-   * Distant-delta repair: one `/sets` on `@` first. That answer is the whole
-   * tree's Abelian — when it matches the cube, stop. Only when `@` moved (or
-   * its child membership drifted) walk down, reading each dirty sibling ring
-   * before descending further.
+   * Distant-delta repair: one `/sets` on `@` first. That answer carries the whole
+   * tree's count — when it matches the cube, stop. Only when `@` moved (or its
+   * child membership drifted) walk down, reading each dirty sibling ring before
+   * descending further.
+   *
+   * Drift is decided on counts alone; see {@link abelianCountEqual}.
    *
    * @param {number} zoom
    * @param {any} bounds
    * @param {import("../cube/index.js").Cube} cube
-   * @param {{ maxParents?: number }} [opts]
-   * @returns {Promise<{ dirty: number, rootBefore?: number, rootAfter?: number, zonesRead?: number }>}
+   * @param {{
+   *   maxParents?: number,
+   *   maxReads?: number,
+   *   keepResolution?: number,
+   *   shouldStop?: () => boolean,
+   *   digConcurrencyCap?: number,
+   *   force?: boolean,
+   * }} [opts]
+   * @returns {Promise<{ dirty: number, mutated?: boolean, rootBefore?: number, rootAfter?: number, zonesRead?: number }>}
    */
   async function reconcileVisible(zoom, bounds, cube, opts = {}) {
     if (!this.network || !cube || zoom == null || bounds == null) {
-      return { dirty: 0 };
+      return { dirty: 0, mutated: false };
     }
-    if (!this.network._hosts?.length) return { dirty: 0 };
-    if (globalThis.__INDEXUS_BEARER__ === "") return { dirty: 0 };
+    if (!this.network._hosts?.length) return { dirty: 0, mutated: false };
+    if (globalThis.__INDEXUS_BEARER__ === "") return { dirty: 0, mutated: false };
 
     const targetXyz = Math.floor(
       zoom + this.options.resolution + this.options.offset.zoom
     );
+    // Same upper bound as worker `pruneDeeperThan(z + 1)`.
+    const keepResolution = Number.isFinite(opts.keepResolution)
+      ? Math.max(0, Math.floor(opts.keepResolution))
+      : targetXyz + 1;
 
     /** @type {Reconcile} */
     const pass = {
@@ -4146,12 +4414,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       collection: this.collection,
       bounds,
       maxDepth: Math.max(0, Math.ceil(targetXyz / Math.max(1, this.space.step))),
+      keepResolution,
       maxReplaces: Number.isFinite(opts.maxParents)
         ? Math.max(1, Math.floor(opts.maxParents))
         : DEFAULT_RECONCILE_MAX_PARENTS,
+      maxReads: Number.isFinite(opts.maxReads)
+        ? Math.max(1, Math.floor(opts.maxReads))
+        : DEFAULT_RECONCILE_MAX_READS,
+      shouldStop: typeof opts.shouldStop === "function" ? opts.shouldStop : null,
+      digConcurrencyCap:
+        Number.isFinite(opts.digConcurrencyCap) && opts.digConcurrencyCap > 0
+          ? Math.floor(opts.digConcurrencyCap)
+          : null,
+      // Only an explicit user refresh skips the Network refresh floor; the
+      // periodic pass rides the cache when it fires inside the TTL.
+      force: opts.force === true,
       replaced: [],
       visiting: new globalThis.Set(),
       dirty: 0,
+      mutated: false,
       read: 0,
     };
 
@@ -4159,20 +4440,33 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     const before = abelianCount(cube.get(rootXyz) ?? { count: 0 });
     const startedAt = Date.now();
 
-    // Always the first (and often only) on-wire read of a quiet pass.
-    invalidate(pass, ROOT);
+    debugLog("reconcile", "root probe begin", {
+      collection: this.collection,
+      localRootCount: before,
+      keepResolution: pass.keepResolution,
+      navigation: this.network?.readOptions?.()?.navigation,
+      method: this.network?.readOptions?.()?.method,
+    });
+
+    // Always the first (and often only) on-wire read of a quiet pass — and the
+    // one the Network refresh floor collapses when passes run back to back.
     let rootChildren;
     try {
       rootChildren = await fetchChildren(
         this.network,
         this.collection,
         ROOT,
-        true
+        true,
+        pass.force
       );
     } catch (error) {
       console.warn("[aggregate.reconcile] root getSets failed:", error);
+      debugLog("reconcile", "root probe failed", {
+        error: String(error?.message || error),
+      });
       return {
         dirty: 0,
+        mutated: false,
         rootBefore: before,
         rootAfter: before,
         zonesRead: 0,
@@ -4184,35 +4478,75 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       cube.get(rootXyz) ??
       create(rootXyz, this.getGeometry(ROOT).bounds, 0, [], undefined, [], ROOT);
     const rootRemote = abelianTotal(rootChildren);
-    if (abelianEqual(rootLocal, rootRemote)) {
-      const drift = childrenMembershipDrift(
-        rootLocal,
-        rootChildren,
-        cube,
-        this.space
-      );
-      if (!drift) {
-        if (debugEnabled("refresh")) {
-          debugLog("refresh", "root quiet — skip subzones", {
-            collection: this.collection,
-            rootCount: before,
-            zonesRead: pass.read,
-            ms: Date.now() - startedAt,
-          });
-        }
-        return {
-          dirty: 0,
-          rootBefore: before,
-          rootAfter: before,
-          zonesRead: pass.read,
-        };
-      }
+    const countMatch = abelianCountEqual(rootLocal, rootRemote);
+    const rootMaterial = materialChildSets(pass, ROOT, rootChildren).map(
+      (child) => child.set
+    );
+    const rootLocalKeep = {
+      ...rootLocal,
+      children: (Array.isArray(rootLocal.children) ? rootLocal.children : []).filter(
+        (xyz) => withinKeepBand(pass, xyz)
+      ),
+    };
+    const drift = countMatch
+      ? childrenMembershipDrift(rootLocalKeep, rootMaterial, cube, this.space)
+      : { reason: "count-mismatch" };
+
+    debugLog("reconcile", "root probe result", {
+      localCount: abelianCount(rootLocal),
+      remoteCount: rootRemote.count,
+      countMatch,
+      drift: drift ? drift.reason : false,
+      childSets: rootMaterial.length,
+      ms: Date.now() - startedAt,
+    });
+
+    if (countMatch && !drift) {
+      debugLog("reconcile", "root quiet — skip subzones", {
+        collection: this.collection,
+        rootCount: before,
+        zonesRead: pass.read,
+        ms: Date.now() - startedAt,
+      });
+      debugLog("refresh", "root quiet — skip subzones", {
+        collection: this.collection,
+        rootCount: before,
+        zonesRead: pass.read,
+        ms: Date.now() - startedAt,
+      });
+      return {
+        dirty: 0,
+        mutated: false,
+        rootBefore: before,
+        rootAfter: before,
+        zonesRead: pass.read,
+      };
     }
+
+    debugLog("reconcile", "root dirty — descend", {
+      reason: drift?.reason || "count-mismatch",
+      maxDepth: pass.maxDepth,
+      keepResolution: pass.keepResolution,
+    });
 
     await dig(pass, ROOT, rootChildren);
 
     const after = abelianCount(cube.get(rootXyz) ?? { count: 0 });
 
+    debugLog("reconcile", "pass done", {
+      collection: this.collection,
+      maxDepth: pass.maxDepth,
+      keepResolution: pass.keepResolution,
+      zonesRead: pass.read,
+      readBudget: pass.maxReads,
+      stopped: walkStopped(pass),
+      branchesReplaced: pass.dirty,
+      mutated: pass.mutated,
+      rootBefore: before,
+      rootAfter: after,
+      rootDelta: signed(after - before),
+      ms: Date.now() - startedAt,
+    });
     if (debugEnabled("refresh")) {
       debugLog("refresh", "pass done", {
         collection: this.collection,
@@ -4224,19 +4558,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         rootDelta: signed(after - before),
         ms: Date.now() - startedAt,
       });
-      if (pass.read > 0 && pass.dirty === 0 && after === before) {
+      if (pass.read > 0 && !pass.mutated && after === before) {
         debugLog("refresh", "nothing moved — the mesh and the cube agree");
       }
     }
 
     return {
       dirty: pass.dirty,
+      mutated: pass.mutated,
       rootBefore: before,
       rootAfter: after,
       zonesRead: pass.read,
     };
   }
 
+  /**
+   * Aggregate drill engine.
+   *
+   * Two LRU caches sit on the Aggregate path and must not be confused:
+   * - `network._cache` — raw `/sets` children keyed by zoneKey (wire shape).
+   * - `grid.cache` — geometry-enriched processed children for the drill.
+   *
+   * The Network and Grid caches deliberately keep different shapes.
+   */
   class Grid {
     constructor(collection, space, options, stream, finish, monitoring, network) {
       this.collection = collection;
@@ -4284,28 +4628,34 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         ? Math.max(0, Math.floor(streamOptions.flushMs))
         : defaultFlushMs;
 
-      this.stream = createStreamCoalescer({
-        minBatch,
-        flushMs,
-        applyBatch: (elements) => this.streamOutput(elements),
-      });
+      // Progressive Aggregate wants every processed zone immediately. Avoid
+      // allocating a second buffer/timer only to flush it on the next line in
+      // process(); the worker remains the single ingest owner.
+      this.stream = streamProgressive
+        ? {
+            enqueue: (elements) => this.streamOutput(elements),
+            flushNow() {},
+          }
+        : createStreamCoalescer({
+            minBatch,
+            flushMs,
+            applyBatch: (elements) => this.streamOutput(elements),
+          });
     }
 
     /**
+     * himo.place drill: floor depth, fire-and-forget refresh so MOVE returns
+     * immediately while the tree walk streams into the cube.
+     *
      * @param {number} zoom
      * @param {any} bounds
      * @param {{ force?: boolean }} [opts] — force=true re-drills even if the
-     *   viewport hash is unchanged (needed after reconcile replaceBranch).
+     *   viewport hash is unchanged (manual Refresh / reconcile replaceBranch).
      */
     async move(zoom, bounds, opts = {}) {
-      // Hash precision must cover cube.display's xyz LOD (zoom+resolution).
-      // ceil avoids short-drilling (e.g. xyz target 11 → need 4 chars, not 3).
-      const targetXyz = Math.floor(
-        zoom + this.options.resolution + this.options.offset.zoom
-      );
-      const depth = Math.max(
-        0,
-        Math.ceil(targetXyz / Math.max(1, this.space.step))
+      const depth = Math.floor(
+        (zoom + this.options.resolution + this.options.offset.zoom) /
+          Math.max(1, this.space.step)
       );
       const hash = this.space.encode(this.space.center(bounds), depth);
 
@@ -4318,27 +4668,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       const id = crypto.randomUUID();
       this.current = { hash, id };
 
-      await this.refresh(id, [this.root], this.project(zoom, bounds), depth);
+      // Do not await — interactive pans cancel via current.id; finish() runs
+      // when this wave completes (same as himo.place).
+      void this.refresh(id, [this.root], this.project(zoom, bounds), depth);
     }
 
     getGeometry(location) {
-      if (this.geometryCache.has(location)) {
-        const cached = this.geometryCache.get(location);
-        this.geometryCache.delete(location);
-        this.geometryCache.set(location, cached);
-        return cached;
-      }
+      const cached = touchLru(this.geometryCache, location);
+      if (cached !== undefined) return cached;
 
       const geometry = {
         bounds: this.space.decode(location),
         xyz: this.space.xyz(location),
       };
 
-      if (this.geometryCache.size >= this.geometryCacheSize) {
-        const firstKey = this.geometryCache.keys().next().value;
-        this.geometryCache.delete(firstKey);
-      }
-      this.geometryCache.set(location, geometry);
+      putLru(this.geometryCache, location, geometry, this.geometryCacheSize);
       return geometry;
     }
 
@@ -4347,11 +4691,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
      * @param {string} key
      */
     getProcessed(key) {
-      if (!this.cache.has(key)) return undefined;
-      const cached = this.cache.get(key);
-      this.cache.delete(key);
-      this.cache.set(key, cached);
-      return cached;
+      return touchLru(this.cache, key);
     }
 
     /**
@@ -4359,21 +4699,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
      * @param {any[]} elements
      */
     putProcessed(key, elements) {
-      if (!this.cache.has(key) && this.cache.size >= this.cacheSize) {
-        this.cache.delete(this.cache.keys().next().value);
-      }
-      this.cache.set(key, elements);
+      putLru(this.cache, key, elements, this.cacheSize);
     }
 
-    /**
-     * Drop the processed-children cache entry for one zone.
-     * @param {string} collection
-     * @param {string} location
-     */
-    invalidate(collection, location) {
-      if (collection == null || location == null) return;
-      this.cache.delete(zoneKey(collection, location));
-    }
   }
 
   Grid.prototype.project = project;
@@ -5014,11 +5342,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
      */
     constructor(options = {}) {
       const maxChunk =
-        Number(options.maxChunkSize) > 0 ? Math.floor(options.maxChunkSize) : 96;
+        Number(options.maxChunkSize) > 0 ? Math.floor(options.maxChunkSize) : 128;
       const maxParallel =
         Number(options.maxParallelChunks) > 0
           ? Math.floor(options.maxParallelChunks)
-          : 16;
+          : 64;
 
       // Chunk size 1 is intentional for method=getSet (one-location batches).
       this.maxChunkSize = Math.max(1, maxChunk);
@@ -5143,6 +5471,241 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   /** @typedef {{ partialPrefix: Map<string, unknown>, uniqInput: string[], resolve: Function, reject: Function }} WaiterEntry */
 
+  /**
+   * Rolling client-side counters for the `/sets` read path.
+   * Snapshotted by Aggregate into the Metrics side tab.
+   */
+
+  const LATENCY_WINDOW = 64;
+
+  class ReadMetrics {
+    constructor() {
+      this.reset();
+    }
+
+    reset() {
+      this.startedAt = Date.now();
+      /** Wire HTTP getSets calls (start). */
+      this.requests = 0;
+      /** getSets calls that finished ok. */
+      this.responsesOk = 0;
+      /** getSets calls that failed. */
+      this.responsesErr = 0;
+      /** Parent locations asked for on the wire (sum). */
+      this.locationsRequested = 0;
+      /** Locations answered from local cache (incl. refresh TTL). */
+      this.cacheHits = 0;
+      /** Subset of cacheHits served despite refresh=true (TTL floor). */
+      this.ttlHits = 0;
+      /** Callers that joined an in-flight wave instead of opening a new one. */
+      this.coalescedJoins = 0;
+      /** IXS1 redirects received. */
+      this.redirects = 0;
+      /** Redirect hops actually followed to another peer. */
+      this.redirectFollows = 0;
+      /** Zones whose Abelian count changed on a refresh store. */
+      this.zonesUpdated = 0;
+      /** Sum of |count deltas| on refresh stores. */
+      this.deltaAbsSum = 0;
+      /** Last non-zero zone delta (signed count). */
+      this.lastDelta = 0;
+      this.lastDeltaLocation = null;
+      this.lastDeltaAt = 0;
+      /** Reconcile passes. */
+      this.reconcilePasses = 0;
+      this.reconcileQuiet = 0;
+      this.reconcileDirty = 0;
+      this.lastRootDelta = 0;
+      this.lastReconcileAt = 0;
+      this.lastReconcileMs = 0;
+      /** Distinct peers that served at least one getSets. */
+      this.peersTouched = new Set();
+      /** In-flight getSets right now. */
+      this.inFlight = 0;
+      /** Ring buffer of recent ok latencies (ms). */
+      this._latencies = [];
+      this.lastLatencyMs = 0;
+      this.latencySum = 0;
+      this.latencyCount = 0;
+      /** Payload accounting — `/sets` answers are binary frames, not JSON. */
+      this.bytesTotal = 0;
+      this.bytesCount = 0;
+      this.lastBytes = 0;
+      this.maxBytes = 0;
+      /** Compressed size, when the node answered with a Content-Length. */
+      this.wireBytesTotal = 0;
+      this.wireBytesCount = 0;
+      /** Decoded size of the answers counted in wireBytesTotal, for the ratio. */
+      this.wireDecodedTotal = 0;
+      /** Decoded rows (Set/Item blocks) carried by those payloads. */
+      this.rowsTotal = 0;
+    }
+
+    /**
+     * @param {{
+     *   cacheSize: number,
+     *   cacheCapacity: number,
+     *   inflightZones: number,
+     *   navigation?: string,
+     *   method?: string,
+     *   refreshTtlMs?: number,
+     * }} live
+     */
+    snapshot(live = {}) {
+      const latencies = this._latencies.slice().sort((a, b) => a - b);
+      const p50 = percentile(latencies, 0.5);
+      const p95 = percentile(latencies, 0.95);
+      const avg =
+        this.latencyCount > 0 ? this.latencySum / this.latencyCount : 0;
+      const dupRatio =
+        this.requests + this.coalescedJoins > 0
+          ? this.coalescedJoins / (this.requests + this.coalescedJoins)
+          : 0;
+      const hitRatio =
+        this.locationsRequested + this.cacheHits > 0
+          ? this.cacheHits / (this.locationsRequested + this.cacheHits)
+          : 0;
+
+      return {
+        startedAt: this.startedAt,
+        uptimeMs: Date.now() - this.startedAt,
+        cacheSize: live.cacheSize ?? 0,
+        cacheCapacity: live.cacheCapacity ?? 0,
+        inflightZones: live.inflightZones ?? 0,
+        inFlight: this.inFlight,
+        navigation: live.navigation ?? null,
+        method: live.method ?? null,
+        refreshTtlMs: live.refreshTtlMs ?? null,
+        requests: this.requests,
+        responsesOk: this.responsesOk,
+        responsesErr: this.responsesErr,
+        locationsRequested: this.locationsRequested,
+        cacheHits: this.cacheHits,
+        ttlHits: this.ttlHits,
+        coalescedJoins: this.coalescedJoins,
+        dupRatio,
+        hitRatio,
+        redirects: this.redirects,
+        redirectFollows: this.redirectFollows,
+        zonesUpdated: this.zonesUpdated,
+        deltaAbsSum: this.deltaAbsSum,
+        lastDelta: this.lastDelta,
+        lastDeltaLocation: this.lastDeltaLocation,
+        lastDeltaAt: this.lastDeltaAt,
+        reconcilePasses: this.reconcilePasses,
+        reconcileQuiet: this.reconcileQuiet,
+        reconcileDirty: this.reconcileDirty,
+        lastRootDelta: this.lastRootDelta,
+        lastReconcileAt: this.lastReconcileAt,
+        lastReconcileMs: this.lastReconcileMs,
+        peersTouched: this.peersTouched.size,
+        lastLatencyMs: this.lastLatencyMs,
+        latencyAvgMs: avg,
+        latencyP50Ms: p50,
+        latencyP95Ms: p95,
+        bytesTotal: this.bytesTotal,
+        bytesAvg: this.bytesCount > 0 ? this.bytesTotal / this.bytesCount : 0,
+        bytesMax: this.maxBytes,
+        lastBytes: this.lastBytes,
+        wireBytesTotal: this.wireBytesTotal,
+        wireBytesAvg:
+          this.wireBytesCount > 0 ? this.wireBytesTotal / this.wireBytesCount : 0,
+        compressionRatio:
+          this.wireBytesTotal > 0 ? this.wireDecodedTotal / this.wireBytesTotal : 0,
+        rowsTotal: this.rowsTotal,
+        bytesPerRow:
+          this.rowsTotal > 0 ? this.bytesTotal / this.rowsTotal : 0,
+        bytesPerLocation:
+          this.locationsRequested > 0
+            ? this.bytesTotal / this.locationsRequested
+            : 0,
+        at: Date.now(),
+      };
+    }
+
+    /**
+     * One `/sets` answer off the wire. `bytes` is the decoded frame; `wireBytes`
+     * is what the link carried, and is only known for unchunked answers.
+     * @param {{ bytes?: number, wireBytes?: number, rows?: number }} payload
+     */
+    onPayload({ bytes = 0, wireBytes = 0, rows = 0 } = {}) {
+      if (!Number.isFinite(bytes) || bytes < 0) return;
+      this.bytesTotal += bytes;
+      this.bytesCount += 1;
+      this.lastBytes = bytes;
+      if (bytes > this.maxBytes) this.maxBytes = bytes;
+      if (Number.isFinite(rows) && rows > 0) this.rowsTotal += rows;
+      if (Number.isFinite(wireBytes) && wireBytes > 0) {
+        this.wireBytesTotal += wireBytes;
+        this.wireBytesCount += 1;
+        this.wireDecodedTotal += bytes;
+      }
+    }
+
+    onCacheHit(count = 1, { ttl = false } = {}) {
+      this.cacheHits += count;
+      if (ttl) this.ttlHits += count;
+    }
+
+    onCoalescedJoin(count = 1) {
+      this.coalescedJoins += count;
+    }
+
+    onRequestStart({ locations = 1, peer = null } = {}) {
+      this.requests += 1;
+      this.inFlight += 1;
+      this.locationsRequested += Math.max(0, locations);
+      if (peer) this.peersTouched.add(peer);
+    }
+
+    onRequestEnd({ ok = true, ms = 0, redirects = 0 } = {}) {
+      this.inFlight = Math.max(0, this.inFlight - 1);
+      if (ok) this.responsesOk += 1;
+      else this.responsesErr += 1;
+      if (ok && Number.isFinite(ms)) {
+        this.lastLatencyMs = ms;
+        this.latencySum += ms;
+        this.latencyCount += 1;
+        this._latencies.push(ms);
+        if (this._latencies.length > LATENCY_WINDOW) this._latencies.shift();
+      }
+      if (Number.isFinite(redirects) && redirects > 0) {
+        this.redirects += redirects;
+      }
+    }
+
+    onRedirectFollow() {
+      this.redirectFollows += 1;
+    }
+
+    onZoneDelta(location, delta) {
+      if (!Number.isFinite(delta) || delta === 0) return;
+      this.zonesUpdated += 1;
+      this.deltaAbsSum += Math.abs(delta);
+      this.lastDelta = delta;
+      this.lastDeltaLocation = location;
+      this.lastDeltaAt = Date.now();
+    }
+
+    onReconcile({ dirty = 0, rootDelta = 0, ms = 0 } = {}) {
+      this.reconcilePasses += 1;
+      if (dirty > 0) this.reconcileDirty += 1;
+      else this.reconcileQuiet += 1;
+      this.lastRootDelta = rootDelta;
+      this.lastReconcileAt = Date.now();
+      this.lastReconcileMs = ms;
+    }
+  }
+
+  function percentile(sorted, p) {
+    if (!sorted.length) return 0;
+    const idx = Math.min(
+      sorted.length - 1,
+      Math.max(0, Math.ceil(p * sorted.length) - 1)
+    );
+    return sorted[idx];
+  }
+
   // Network.js
 
   /** @typedef {"ingress" | "direct"} ReadNavigation */
@@ -5207,11 +5770,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
      * @param {{
      *   setsMaxChunkSize?: number,
      *   setsMaxParallelChunks?: number,
-     *   navigation?: ReadNavigation,
-     *   method?: ReadMethod,
-     *   refreshTtlMs?: number,
-     * }} [setsPoolOptions] - tuning for merged `/sets` batching and shared read modes.
-     */
+   *   navigation?: ReadNavigation,
+   *   method?: ReadMethod,
+   *   refreshTtlMs?: number,
+   *   meshDiscovery?: boolean,
+   *   meshDiscoveryIntervalMs?: number,
+   *   meshDiscoveryMax?: number,
+   *   gateway?: string,
+   * }} [setsPoolOptions] - tuning for merged `/sets` batching and shared read modes.
+   *   `gateway` (e.g. `http://127.0.0.1:5173/api/p2p`) routes every peer call
+   *   through one origin so the browser is not capped at ~6 sockets per node.
+   */
     constructor(
       protocol,
       api,
@@ -5230,8 +5799,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
       this._concurrency = concurrency;
 
-      // Initialize the throttler with the specified concurrency limit
+      // Initialize the throttler with the specified concurrency limit.
+      // All wire reads (getSets / getNeighbors) take a slot here — the grid
+      // asyncPool alone was not enough: Promise.all across peers bypassed it.
       this._throttler = new Throttler(this._concurrency);
+      /** Monotonic id so getSets slots are concurrency-limited, not deduped. */
+      this._wireSeq = 0;
 
       // Session seed: the XOR-nearest peer is the read ingress, and every read
       // goes through getSets → ingressPeer(), so a session stays on one node.
@@ -5241,6 +5814,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       // re-advertising them and the ingress flaps across the whole mesh.
       this._hintRejected = new Set();
 
+      // Zone key → the peer that last answered it with data. The XOR guess does
+      // not learn from an IXS1 redirect, so without this the same zone pays the
+      // same extra hop on every read. Insertion-ordered, oldest evicted.
+      /** @type {Map<string, import("./peer.js").Peer>} */
+      this._owners = new Map();
+      this._ownersMax = 4096;
+
       // Initialize the cache with a maximum size
       this._cache = new Map();
       this._cacheSize = cacheSize;
@@ -5248,6 +5828,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       this._cacheFetchedAt = new Map();
       /** zone key → the read wave currently on the wire for that zone. */
       this._inflight = new Map();
+      this._metrics = new ReadMetrics();
+      /** @type {null | ((snap: object) => void)} */
+      this._onMetrics = null;
 
       const poolCfg =
         setsPoolOptions && typeof setsPoolOptions === "object" ? setsPoolOptions : {};
@@ -5261,17 +5844,49 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
           ? Math.floor(poolCfg.refreshTtlMs)
           : 5000;
 
+      // Both navigations route out of `_table`, but only `direct` refills it as
+      // it reads: every IXS1 redirect names an owner. An `ingress` session never
+      // sees a redirect, so its table stays at the bootstrap hosts plus whatever
+      // the ingress hint happens to name, and the client cannot reach a node it
+      // was not handed. `/neighbors` keeps one shared table for both.
+      this._meshDiscovery = poolCfg.meshDiscovery !== false;
+      this._meshDiscoveryIntervalMs =
+        Number.isFinite(poolCfg.meshDiscoveryIntervalMs) &&
+        poolCfg.meshDiscoveryIntervalMs >= 0
+          ? Math.floor(poolCfg.meshDiscoveryIntervalMs)
+          : 30000;
+      // A node answers with everything it knows; a browser reaches far fewer
+      // than a node does, so the table is bounded rather than mesh-sized.
+      this._meshDiscoveryMax =
+        Number(poolCfg.meshDiscoveryMax) > 0
+          ? Math.floor(poolCfg.meshDiscoveryMax)
+          : 64;
+      this._meshDiscoveryAt = 0;
+      /** @type {Promise<number> | null} */
+      this._meshDiscoveryInflight = null;
+
+      // Same-origin peer gateway (dashboard `/api/p2p/:port`). Empty = dial the
+      // peer host:port directly with `_protocol`.
+      this._gateway =
+        typeof poolCfg.gateway === "string" && poolCfg.gateway.trim()
+          ? poolCfg.gateway.replace(/\/$/, "")
+          : null;
+
       this._readNavigation = normalizeNavigation(poolCfg.navigation);
       this._readMethod = normalizeMethod(poolCfg.method);
+      // Parallel HTTP waves used to be hard-capped at 16 even when the Throttler
+      // allowed 100 — that serialized fat Aggregate prefetches into many micro
+      // waves. Default parallel chunks now track concurrency; chunk size stays
+      // modest so a wrong-XOR batch does not redirect hundreds of locations.
       this._setsPoolCfg = {
         setsMaxChunkSize:
           Number(poolCfg.setsMaxChunkSize) > 0
             ? Math.floor(poolCfg.setsMaxChunkSize)
-            : 96,
+            : 128,
         setsMaxParallelChunks:
           Number(poolCfg.setsMaxParallelChunks) > 0
             ? Math.floor(poolCfg.setsMaxParallelChunks)
-            : Math.min(this._concurrency, 16),
+            : this._concurrency,
       };
       this._setsPool = this._makeSetsPool();
 
@@ -5328,6 +5943,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       this._cacheFetchedAt.clear();
       this._inflight.clear();
       this._setsPool = this._makeSetsPool();
+      this._metrics.reset();
+      this._emitMetrics();
     }
 
     setActivityHandler(handler) {
@@ -5336,6 +5953,46 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     setPeersHandler(handler) {
       this._onPeers = typeof handler === "function" ? handler : null;
+    }
+
+    setMetricsHandler(handler) {
+      this._onMetrics = typeof handler === "function" ? handler : null;
+    }
+
+    /** @returns {object} */
+    readMetrics() {
+      return this._metrics.snapshot({
+        cacheSize: this._cache.size,
+        cacheCapacity: this._cacheSize,
+        inflightZones: this._inflight.size,
+        navigation: this._readNavigation,
+        method: this._readMethod,
+        refreshTtlMs: this._refreshTtlMs,
+      });
+    }
+
+    /** Push a metrics snapshot to the Aggregate side panel. */
+    _emitMetrics() {
+      if (typeof this._onMetrics !== "function") return;
+      try {
+        this._onMetrics(this.readMetrics());
+      } catch {
+        /* ignore */
+      }
+    }
+
+    /**
+     * Record one Aggregate reconcile pass (quiet or dirty).
+     * @param {{ dirty?: number, rootDelta?: number, ms?: number }} result
+     */
+    noteReconcile(result = {}) {
+      this._metrics.onReconcile(result);
+      this._emitMetrics();
+    }
+
+    resetReadMetrics() {
+      this._metrics.reset();
+      this._emitMetrics();
     }
 
     // Session seed in the same base64url alphabet as peer hashes, so the UI can
@@ -5405,28 +6062,208 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     /**
+     * Peer hashes currently in the routing table.
+     * @returns {Set<string>}
+     */
+    _knownHashes() {
+      const known = new Set();
+      for (const peer of this._table.peers()) known.add(peer.hash());
+      return known;
+    }
+
+    /**
+     * Route one discovered contact into the table. Peers this client already
+     * failed to reach stay out: discovery answers name every node the mesh
+     * knows, including ones only reachable from inside it.
+     * @param {{ name?: string, hash?: string, ip?: string, port?: number } | import("./peer.js").Peer} contact
+     * @param {Set<string>} [known] - hashes already in the table, updated in place
+     * @returns {boolean} true when the table gained a peer
+     */
+    _insertPeer(contact, known) {
+      if (!contact) return false;
+      try {
+        const peer =
+          contact instanceof Peer
+            ? contact
+            : new Peer(
+                contact.name ?? contact.hash,
+                contact.ips ?? { [contact.ip]: null },
+                Number(contact.port),
+                contact.ip
+              );
+        const hash = peer.hash();
+        if (!hash || !peer.ip() || !(peer.port() > 0)) return false;
+        if (this._hintRejected.has(hash)) return false;
+        const seen = known ?? this._knownHashes();
+        if (seen.has(hash)) return false;
+        this._table.insert(peer.id(), peer);
+        seen.add(hash);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    /**
+     * A node buckets `/neighbors` against its own peer ids, so an origin of any
+     * other width falls outside every bucket and the answer comes back empty.
+     * The session key is wider than a peer id: cut it to the width of the peer
+     * being asked.
+     * @param {import("./peer.js").Peer} peer
+     * @returns {string} url64 origin
+     */
+    _discoveryOrigin(peer) {
+      const width = peer.id()?.length ?? 0;
+      if (!width || width >= this._routingKey.length) {
+        return this.routingKeyHash();
+      }
+      return encodeUrl64(this._routingKey.subarray(0, width));
+    }
+
+    /**
+     * Ask a known node for the peers nearest our session key and fold them into
+     * the routing table. One round trip, and the same table both navigations
+     * already route reads and writes from.
+     * @param {import("./peer.js").Peer | null} [from] - defaults to the ingress peer
+     * @returns {Promise<number>} peers added
+     */
+    async discoverMesh(from = null) {
+      if (typeof this._api.getNeighbors !== "function") return 0;
+      const peer = from ?? this.ingressPeer();
+      if (!peer) return 0;
+
+      let contacts;
+      try {
+        contacts = await this._enqueueWire(peer, "getNeighbors", () =>
+          this._api.getNeighbors(
+            this._protocol,
+            peer,
+            this._discoveryOrigin(peer),
+            this._wireOpts()
+          )
+        );
+      } catch {
+        // Discovery is opportunistic: a node that cannot answer is still a
+        // perfectly good ingress, so nothing is dropped from the table here.
+        return 0;
+      }
+
+      const known = this._knownHashes();
+      let added = 0;
+      for (const contact of contacts || []) {
+        if (added >= this._meshDiscoveryMax) break;
+        if (this._insertPeer(contact, known)) added++;
+      }
+      if (added > 0) this._notifyPeers();
+      return added;
+    }
+
+    /**
+     * Refresh the node table at most once per interval, off the read path.
+     */
+    _maybeDiscoverMesh() {
+      if (!this._meshDiscovery || this._meshDiscoveryInflight) return;
+      const at = Date.now();
+      if (at - this._meshDiscoveryAt < this._meshDiscoveryIntervalMs) return;
+      this._meshDiscoveryAt = at;
+      this._meshDiscoveryInflight = this.discoverMesh()
+        .catch(() => 0)
+        .finally(() => {
+          this._meshDiscoveryInflight = null;
+        });
+    }
+
+    /**
      * @param {"start"|"end"} phase
      * @param {import("./peer.js").Peer | null} peer
-     * @param {{ method: string, ok?: boolean, ms?: number, collection?: string, location?: string }} meta
+     * @param {{
+     *   method: string,
+     *   ok?: boolean,
+     *   ms?: number,
+     *   collection?: string,
+     *   location?: string,
+     *   locations?: string[],
+     *   navigation?: string,
+     *   refresh?: boolean,
+     *   deep?: boolean,
+     *   redirects?: number,
+     *   reason?: string,
+     * }} meta
      */
     _emitActivity(phase, peer, meta) {
+      const ip = meta.ip ?? (peer ? peer.ip() : null);
+      const port = meta.port ?? (peer ? peer.port() : null);
+      const hash = meta.hash ?? (peer ? peer.hash() : null);
+      const host = meta.host ?? (ip != null ? `${ip}|${port}` : null);
+
+      if (meta.method === "getSets") {
+        const locs = meta.locations ?? (meta.location ? [meta.location] : []);
+        if (phase === "start") {
+          this._metrics.onRequestStart({
+            locations: locs.length || 1,
+            peer: hash,
+          });
+        } else {
+          this._metrics.onRequestEnd({
+            ok: meta.ok !== false,
+            ms: meta.ms,
+            redirects: meta.redirects,
+          });
+          if (meta.ok !== false && Number.isFinite(meta.bytes)) {
+            this._metrics.onPayload({
+              bytes: meta.bytes,
+              wireBytes: meta.wireBytes,
+              rows: meta.rows,
+            });
+          }
+          // No push here. Counters are read on a timer by the Metrics tab;
+          // emitting per response put a main-thread React render on every
+          // request and that is what made panning stutter.
+        }
+        if (debugEnabled("sets")) {
+          debugLog(
+            "sets",
+            phase === "start" ? "wire request" : "wire response",
+            {
+              peer: hash,
+              host,
+              locations: locs,
+              navigation: meta.navigation ?? this._readNavigation,
+              refresh: meta.refresh === true,
+              deep: meta.deep,
+              ok: meta.ok,
+              ms: meta.ms,
+              redirects: meta.redirects,
+              reason: meta.reason,
+            }
+          );
+        }
+      }
+
       if (typeof this._onActivity !== "function") return;
+      const event = {
+        phase,
+        method: meta.method,
+        hash,
+        ip,
+        port,
+        host,
+        ok: meta.ok,
+        ms: meta.ms,
+        collection: meta.collection,
+        location: meta.location,
+        locations: meta.locations,
+        navigation: meta.navigation,
+        refresh: meta.refresh,
+        deep: meta.deep,
+        redirects: meta.redirects,
+        reason: meta.reason,
+        bytes: meta.bytes,
+        wireBytes: meta.wireBytes,
+        rows: meta.rows,
+      };
       try {
-        const ip = meta.ip ?? (peer ? peer.ip() : null);
-        const port = meta.port ?? (peer ? peer.port() : null);
-        const hash = meta.hash ?? (peer ? peer.hash() : null);
-        this._onActivity({
-          phase,
-          method: meta.method,
-          hash,
-          ip,
-          port,
-          host: meta.host ?? (ip != null ? `${ip}|${port}` : null),
-          ok: meta.ok,
-          ms: meta.ms,
-          collection: meta.collection,
-          location: meta.location,
-        });
+        this._onActivity(event);
       } catch {
         /* ignore */
       }
@@ -5437,7 +6274,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
      * @param {import("./peer.js").Peer} peer
      * @param {string} method
      * @param {() => Promise<T>} fn
-     * @param {{ collection?: string, location?: string }} [meta]
+     * @param {{
+     *   collection?: string,
+     *   location?: string,
+     *   locations?: string[],
+     *   navigation?: string,
+     *   refresh?: boolean,
+     *   deep?: boolean,
+     *   reason?: string,
+     * }} [meta]
      * @returns {Promise<T>}
      */
     async _withActivity(peer, method, fn, meta = {}) {
@@ -5446,7 +6291,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       try {
         const result = await fn();
         const ms = now() - started;
-        this._emitActivity("end", peer, { method, ok: true, ms, ...meta });
+        const redirects = Array.isArray(result?.redirects)
+          ? result.redirects.length
+          : undefined;
+        this._emitActivity("end", peer, {
+          method,
+          ok: true,
+          ms,
+          redirects,
+          bytes: result?.bytes,
+          wireBytes: result?.wireBytes,
+          rows: result?.rows,
+          ...meta,
+        });
         return result;
       } catch (error) {
         this._emitActivity("end", peer, {
@@ -5457,6 +6314,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         });
         throw error;
       }
+    }
+
+    /**
+     * Run a peer call under the concurrency pool. Keys are unique so the
+     * Throttler only limits parallelism (zone coalescing lives in `_inflight`).
+     * @template T
+     * @param {import("./peer.js").Peer | null} peer
+     * @param {string} method
+     * @param {() => Promise<T>} fn
+     * @param {object} [meta]
+     * @returns {Promise<T>}
+     */
+    _enqueueWire(peer, method, fn, meta = {}) {
+      const key = `${method}:${peer?.hash?.() ?? "?"}:${++this._wireSeq}`;
+      return this._throttler.enqueue(key, () =>
+        this._withActivity(peer, method, fn, meta)
+      );
+    }
+
+    /** Options every API call needs when a same-origin gateway is configured. */
+    _wireOpts(extra = {}) {
+      return this._gateway ? { gateway: this._gateway, ...extra } : extra;
     }
 
     /**
@@ -5484,7 +6363,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
       this._emitActivity("start", null, meta);
       try {
-        const peer = await this._api.pingPeer(this._protocol, ip, port);
+        const peer = await this._api.pingPeer(
+          this._protocol,
+          ip,
+          port,
+          this._wireOpts()
+        );
         this._emitActivity("end", peer, { ...meta, ok: true, ms: now() - started });
         return peer;
       } catch {
@@ -5510,6 +6394,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
       peers.forEach((peer) => this._table.insert(peer.id(), peer));
       this._notifyPeers();
+
+      // One introduction before the first read, so a session starts with the
+      // mesh rather than with its bootstrap hosts.
+      if (this._meshDiscovery) {
+        this._meshDiscoveryAt = Date.now();
+        await this.discoverMesh();
+      }
     }
 
     /**
@@ -5556,7 +6447,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 root,
                 location,
                 metrics,
-                reference
+                reference,
+                this._wireOpts()
               ),
               { collection, location }
             )
@@ -5655,6 +6547,35 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
      * @param {Set<string>} viaSet
      * @returns {import("./peer.js").Peer | null}
      */
+    /**
+     * Remember who served a zone, so the next read skips the redirect.
+     * @param {string} cacheKey
+     * @param {import("./peer.js").Peer} peer
+     */
+    _rememberOwner(cacheKey, peer) {
+      if (!peer) return;
+      putLru(this._owners, cacheKey, peer, this._ownersMax);
+    }
+
+    /**
+     * The remembered owner, when it is still a peer we hold and have not
+     * already tried on this read.
+     * @param {string} cacheKey
+     * @param {Set<string>} viaSet
+     * @returns {import("./peer.js").Peer | null}
+     */
+    _knownOwner(cacheKey, viaSet) {
+      const peer = this._owners.get(cacheKey);
+      if (!peer) return null;
+      if (viaSet && viaSet.has(peer.hash())) return null;
+      const held = this._table.nearest(peer.id());
+      if (!held || held.hash() !== peer.hash()) {
+        this._owners.delete(cacheKey);
+        return null;
+      }
+      return peer;
+    }
+
     _nearestExcluding(id, viaSet) {
       if (!viaSet || viaSet.size === 0) {
         return this._table.nearest(id);
@@ -5681,13 +6602,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
      * @returns {any[] | undefined}
      */
     _touchCacheEntry(cacheKey) {
-      if (!this._cache.has(cacheKey)) {
-        return undefined;
-      }
-      const cached = this._cache.get(cacheKey);
-      this._cache.delete(cacheKey);
-      this._cache.set(cacheKey, cached);
-      return cached;
+      return touchLru(this._cache, cacheKey);
     }
 
     /**
@@ -5695,12 +6610,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
      * @param {any[]} bucket
      */
     _putCacheChildren(cacheKey, bucket) {
-      if (!this._cache.has(cacheKey) && this._cache.size >= this._cacheSize) {
-        const firstKey = this._cache.keys().next().value;
-        this._cache.delete(firstKey);
-        this._cacheFetchedAt.delete(firstKey);
-      }
-      this._cache.set(cacheKey, bucket);
+      putLru(this._cache, cacheKey, bucket, this._cacheSize, (evicted) => {
+        this._cacheFetchedAt.delete(evicted);
+      });
       this._cacheFetchedAt.set(cacheKey, Date.now());
     }
 
@@ -5756,6 +6668,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
       }
 
+      this._maybeDiscoverMesh();
+
       const navigation = normalizeNavigation(
         options.navigation ?? this._readNavigation
       );
@@ -5787,17 +6701,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         try {
-          const { elements, ingress } = await this._withActivity(
+          const { elements, ingress } = await this._enqueueWire(
             peer,
             "getSets",
             () =>
-              this._api.getSets(this._protocol, peer, collection, stillMissing, {
-                deep: true,
-                refresh,
-                envelope: false,
-                routingKey: this._routingKey,
-              }),
-            { collection, location: stillMissing[0] }
+              this._api.getSets(
+                this._protocol,
+                peer,
+                collection,
+                stillMissing,
+                this._wireOpts({
+                  deep: true,
+                  refresh,
+                  envelope: false,
+                  routingKey: this._routingKey,
+                })
+              ),
+            {
+              collection,
+              location: stillMissing[0],
+              locations: stillMissing,
+              navigation: "ingress",
+              refresh,
+              deep: true,
+              reason: "ingress-chunk",
+            }
           );
 
           this._adoptIngressHint(ingress);
@@ -5815,15 +6743,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             status === null ? " (unreachable)" : ` (HTTP ${status})`
           }. Retrying with a different peer...`
           );
-          debugLog("sets", "peer dropped for this read", {
-            peer: peer.hash(),
-            status,
-            blacklisted: status === null,
-            locations: stillMissing.length,
-            first: stillMissing[0],
-            attemptsLeft: attempts - 1,
-            navigation: "ingress",
-          });
+          if (debugEnabled("sets")) {
+            debugLog("sets", "peer dropped for this read", {
+              peer: peer.hash(),
+              status,
+              blacklisted: status === null,
+              locations: stillMissing.length,
+              first: stillMissing[0],
+              attemptsLeft: attempts - 1,
+              navigation: "ingress",
+            });
+          }
 
           attempts--;
           if (attempts === 0) {
@@ -5861,6 +6791,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         for (const [location, state] of pending) {
           let peer = state.peer;
+          if (!peer) {
+            peer = this._knownOwner(zoneKey(collection, location), state.via);
+          }
           if (!peer) {
             const id = zoneKeyID(collection, state.probe);
             peer = this._nearestExcluding(id, state.via);
@@ -5909,17 +6842,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     async _directRound(collection, group, pending, refresh) {
       const { peer, locations, via } = group;
       try {
-        const { elements, redirects } = await this._withActivity(
+        const { elements, redirects } = await this._enqueueWire(
           peer,
           "getSets",
           () =>
-            this._api.getSets(this._protocol, peer, collection, locations, {
-              deep: false,
-              envelope: true,
-              refresh,
-              via,
-            }),
-          { collection, location: locations[0] }
+            this._api.getSets(
+              this._protocol,
+              peer,
+              collection,
+              locations,
+              this._wireOpts({
+                deep: false,
+                envelope: true,
+                refresh,
+                via,
+              })
+            ),
+          {
+            collection,
+            location: locations[0],
+            locations,
+            navigation: "direct",
+            refresh,
+            deep: false,
+            reason: "direct-round",
+          }
         );
 
         const byParent = distributeElementsByParent(locations, elements);
@@ -5932,24 +6879,34 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (const location of locations) {
           const state = pending.get(location);
           if (!state) continue;
+          const cacheKey = zoneKey(collection, location);
           state.via.add(peer.hash());
 
           const bucket = byParent.get(location) ?? [];
           if (bucket.length > 0) {
-            if (refresh && debugEnabled("refresh")) {
-              const before = this._cache.get(zoneKey(collection, location));
-              const delta =
-                abelianTotal(bucket).count - abelianTotal(before ?? []).count;
-              if (delta !== 0) {
-                debugLog("refresh", "zone moved", {
-                  location,
-                  was: abelianTotal(before ?? []).count,
-                  now: abelianTotal(bucket).count,
-                  delta: signed(delta),
-                });
+            if (refresh) {
+              const before = this._cache.get(cacheKey);
+              // Skip "was: 0" noise from cold fills / prior invalidate — only
+              // report a real move when we had a previous cached answer.
+              if (before !== undefined) {
+                const beforeCount = abelianTotal(before).count;
+                const afterCount = abelianTotal(bucket).count;
+                const delta = afterCount - beforeCount;
+                if (delta !== 0) {
+                  this._metrics.onZoneDelta(location, delta);
+                  if (debugEnabled("refresh")) {
+                    debugLog("refresh", "zone moved", {
+                      location,
+                      was: beforeCount,
+                      now: afterCount,
+                      delta: signed(delta),
+                    });
+                  }
+                }
               }
             }
-            this._putCacheChildren(zoneKey(collection, location), bucket);
+            this._putCacheChildren(cacheKey, bucket);
+            this._rememberOwner(cacheKey, peer);
             pending.delete(location);
             continue;
           }
@@ -5957,7 +6914,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
           const redirect = redirectByLoc.get(location);
           if (redirect && redirect.name && redirect.port > 0) {
             if (state.via.has(redirect.name)) {
-              this._putCacheChildren(zoneKey(collection, location), []);
+              this._putCacheChildren(cacheKey, []);
               pending.delete(location);
               continue;
             }
@@ -5971,6 +6928,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
               this._table.insert(next.id(), next);
               state.peer = next;
               this._notifyPeers();
+              this._metrics.onRedirectFollow();
+              if (debugEnabled("sets")) {
+                debugLog("sets", "direct redirect follow", {
+                  location,
+                  from: peer.hash(),
+                  to: redirect.name,
+                  toHost: `${redirect.ip}|${redirect.port}`,
+                  via: [...state.via],
+                });
+              }
               continue;
             } catch {
               /* fall through to parent probe */
@@ -5979,13 +6946,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
           // Parent-key peer fallback while still requesting the original location.
           if (state.probe === ROOT) {
-            this._putCacheChildren(zoneKey(collection, location), []);
+            this._putCacheChildren(cacheKey, []);
             pending.delete(location);
             continue;
           }
           const nextProbe = parent$1(state.probe);
           if (!nextProbe) {
-            this._putCacheChildren(zoneKey(collection, location), []);
+            this._putCacheChildren(cacheKey, []);
             pending.delete(location);
             continue;
           }
@@ -6005,12 +6972,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
           state.via.add(peer.hash());
           state.peer = null;
         }
-        debugLog("sets", "direct peer dropped", {
-          peer: peer.hash(),
-          status,
-          locations: locations.length,
-          first: locations[0],
-        });
+        if (debugEnabled("sets")) {
+          debugLog("sets", "direct peer dropped", {
+            peer: peer.hash(),
+            status,
+            locations: locations.length,
+            first: locations[0],
+          });
+        }
       }
     }
 
@@ -6025,17 +6994,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       for (let i = 0; i < locations.length; i++) {
         const location = locations[i];
         const bucket = byParent.get(location) ?? [];
-        if (refresh && debugEnabled("refresh")) {
-          const before = this._cache.get(zoneKey(collection, location));
+        const before = this._cache.get(zoneKey(collection, location));
+        if (refresh && before !== undefined) {
           const delta =
-            abelianTotal(bucket).count - abelianTotal(before ?? []).count;
+            abelianTotal(bucket).count - abelianTotal(before).count;
           if (delta !== 0) {
-            debugLog("refresh", "zone moved", {
-              location,
-              was: abelianTotal(before ?? []).count,
-              now: abelianTotal(bucket).count,
-              delta: signed(delta),
-            });
+            this._metrics.onZoneDelta(location, delta);
+            if (debugEnabled("refresh")) {
+              debugLog("refresh", "zone moved", {
+                location,
+                was: abelianTotal(before).count,
+                now: abelianTotal(bucket).count,
+                delta: signed(delta),
+              });
+            }
           }
         }
         this._putCacheChildren(zoneKey(collection, location), bucket);
@@ -6078,6 +7050,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       }
 
       const refresh = options.refresh === true;
+      // Re-read without deleting the cache entry first (so zone deltas are real).
+      const force = options.force === true;
       const navigation = normalizeNavigation(
         options.navigation ?? this._readNavigation
       );
@@ -6087,6 +7061,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       const result = new Map();
 
       const missingForFetch = [];
+      const cachedHits = [];
+      const ttlHits = [];
       const now = Date.now();
 
       for (const location of uniqInput) {
@@ -6098,17 +7074,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // not start with `@` (handled in distributeElementsByParent).
         const cacheKey = zoneKey(collection, location);
         const cached = this._touchCacheEntry(cacheKey);
-        if (
-          cached === undefined ||
-          (refresh && !this._refreshWithinTtl(cacheKey, now))
-        ) {
+        if (cached === undefined) {
+          missingForFetch.push(location);
+        } else if (refresh && (force || !this._refreshWithinTtl(cacheKey, now))) {
           missingForFetch.push(location);
         } else {
+          if (refresh) ttlHits.push(location);
+          else cachedHits.push(location);
           result.set(location, Array.isArray(cached) ? cached : []);
         }
       }
 
+      if (cachedHits.length) this._metrics.onCacheHit(cachedHits.length);
+      if (ttlHits.length) {
+        this._metrics.onCacheHit(ttlHits.length, { ttl: true });
+      }
+
       if (missingForFetch.length === 0) {
+        // Cache hits are counted in metrics — do not log or push per call. A pan
+        // over warm zones is nothing but this branch, and pushing a snapshot
+        // here re-rendered the side panel on every cached read.
         return result;
       }
 
@@ -6120,6 +7105,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         const inflight = this._inflight.get(zoneKey(collection, location));
         if (inflight && (inflight.refresh || !refresh)) {
           joined.push(inflight.promise);
+          this._metrics.onCoalescedJoin(1);
         } else {
           toFetch.push(location);
         }
@@ -12197,20 +13183,40 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   /**
+   * Build an absolute URL to a peer path.
+   *
+   * When `gateway` is set (dashboard `/api/p2p`), every peer shares one browser
+   * origin so HTTP/1.1's ~6 sockets-per-host cap does not serialize getSets.
+   * The gateway path is `/{port}{path}` and the server fans out to the node.
+   *
+   * @param {string} protocol - `http` | `https` (ignored when gateway is set)
+   * @param {string} ip
+   * @param {number} port
+   * @param {string} path - must start with `/`
+   * @param {string | null | undefined} gateway
+   */
+  function peerUrl(protocol, ip, port, path, gateway) {
+    const suffix = path.startsWith("/") ? path : `/${path}`;
+    if (typeof gateway === "string" && gateway) {
+      return `${gateway.replace(/\/$/, "")}/${port}${suffix}`;
+    }
+    return `${protocol}://${getHostFromIP(ip)}:${port}${suffix}`;
+  }
+
+  /**
    * Ping
    * @param {string} protocol - Protocol to use to contact the peer http/https.
    * @param {string} ip - The ip of the peer
    * @param {number} port - The port of the peer
-   * @returns {Promise<Peer>} - A promise that resolves when the item is added.
+   * @param {{ gateway?: string }} [options]
+   * @returns {Promise<Peer>}
    */
-  async function pingPeer(protocol, ip, port) {
-    // Construct the POST request body
+  async function pingPeer(protocol, ip, port, options = {}) {
     const requestBody = {};
 
     try {
-      // Make the POST request to ping the peer
       const response = await axios$1.post(
-        `${protocol}://${getHostFromIP(ip)}:${port}/ping`,
+        peerUrl(protocol, ip, port, "/ping", options.gateway),
         requestBody,
         {
           headers: authHeaders({
@@ -12219,20 +13225,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
       );
 
-      // Return the peer
       const data = response.data;
-
-      // Create a Peer instance from the contact data
       const contactData = data.contact;
-      const contactPeer = new Peer(
+      return new Peer(
         contactData.name,
         contactData.ips,
         contactData.port,
         ip
       );
-      return contactPeer;
     } catch (error) {
-      // Handle and log errors
       console.error("Error pinging the host:", error);
       throw error;
     }
@@ -12243,11 +13244,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    * @param {string} protocol
    * @param {Peer} peer
    * @param {string} origin - url64-encoded origin id used as the query key
+   * @param {{ gateway?: string }} [options]
    * @returns {Promise<Peer[]>}
    */
-  async function getNeighbors(protocol, peer, origin) {
+  async function getNeighbors(protocol, peer, origin, options = {}) {
     const response = await axios$1.get(
-      `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/neighbors`,
+      peerUrl(protocol, peer.ip(), peer.port(), "/neighbors", options.gateway),
       {
         params: { origin },
         headers: authHeaders({
@@ -12259,10 +13261,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     const list = response.data?.neighbors || [];
     return list.map((contactData) => {
       const ips = contactData.ips || {};
-      const ip =
-        contactData.ip ||
-        Object.keys(ips)[0] ||
-        peer.ip();
+      const ip = contactData.ip || Object.keys(ips)[0] || peer.ip();
       return new Peer(contactData.name, ips, contactData.port, ip);
     });
   }
@@ -12276,6 +13275,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    * @param {string} root - The targeted root set.
    * @param {string} location - The location of the item.
    * @param {string} id - The ID of the item.
+   * @param {{ gateway?: string }} [options]
    * @returns {Promise<Object>} - The response from the server.
    */
   async function addItem(
@@ -12285,7 +13285,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     root,
     location,
     metrics,
-    reference
+    reference,
+    options = {}
   ) {
     // Construct the POST request body
     const requestBody = {
@@ -12302,7 +13303,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     try {
       // Make the POST request to add the item to the collection
       await axios$1.post(
-        `${protocol}://${getHostFromIP(peer.ip())}:${peer.port()}/item`,
+        peerUrl(protocol, peer.ip(), peer.port(), "/item", options.gateway),
         requestBody,
         {
           headers: authHeaders({
@@ -12479,12 +13480,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    *   envelope?: boolean,
    *   via?: string | string[],
    *   routingKey?: Uint8Array,
+   *   gateway?: string,
    * }} [options]
    * @returns {Promise<{
    *   elements: any[],
    *   redirects: Array<{ location: string, name: string, ip: string, port: number }>,
    *   ingress?: { name: string, ip: string, port: number } | null,
    *   bytes?: number,
+   *   wireBytes?: number,
    *   rows?: number,
    *   folded?: number,
    * }>}
@@ -12502,9 +13505,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     const refresh = options.refresh === true;
     const envelope = options.envelope === true || (!deep && options.envelope !== false);
     const locationsParam = cleaned.join(",");
-    let url = `${protocol}://${getHostFromIP(
-    peer.ip()
-  )}:${peer.port()}/sets?collection=${encodeURIComponent(
+    let url = `${peerUrl(protocol, peer.ip(), peer.port(), "/sets", options.gateway)}?collection=${encodeURIComponent(
     collection
   )}&location=${encodeURIComponent(locationsParam)}&deep=${
     deep ? "true" : "false"
@@ -12530,6 +13531,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     });
 
     const ingress = ingressFromHeaders(response.headers);
+    // Present only when the node sent an unchunked body: with `Content-Encoding:
+    // gzip` it is the compressed size, so it tells what the link actually carried
+    // while `bytes` below stays the decoded frame the browser handed us.
+    const wireBytes = Number(response.headers?.["content-length"]);
 
     const raw = response.data;
     let u8 = null;
@@ -12550,7 +13555,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         refresh,
         envelope,
       });
-      return { elements: [], redirects: [], ingress, bytes: 0, rows: 0, folded: 0 };
+      return {
+        elements: [],
+        redirects: [],
+        ingress,
+        bytes: 0,
+        wireBytes: 0,
+        rows: 0,
+        folded: 0,
+      };
     }
 
     let redirects = [];
@@ -12562,7 +13575,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (!body || body.byteLength === 0) {
-      return { elements: [], redirects, ingress, bytes: u8.byteLength, rows: 0, folded: 0 };
+      return {
+        elements: [],
+        redirects,
+        ingress,
+        bytes: u8.byteLength,
+        wireBytes,
+        rows: 0,
+        folded: 0,
+      };
     }
 
     const propertyCount =
@@ -12597,6 +13618,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       redirects,
       ingress,
       bytes: u8.byteLength,
+      wireBytes,
       rows,
       folded: stats.folded,
     };
@@ -12709,6 +13731,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   exports.isDirectChild = isDirectChild;
   exports.parent = parent$1;
   exports.setDebug = setDebug;
+  exports.setDebugSink = setDebugSink;
   exports.zoneKey = zoneKey;
   exports.zoneKeyID = zoneKeyID;
 

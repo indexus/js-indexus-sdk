@@ -1,16 +1,18 @@
 import { Item, Monitoring, State } from "../model/index.js";
 
-export async function getSet(set, addSet) {
-  if (set instanceof Item) {
-    addSet(set);
-    this.monitoring.send(new Monitoring(this.level + 1, State.Indexed, set));
-    return;
-  }
+/**
+ * Filter + locate children from a network response, then hand them to `addSet`.
+ * Shared by single-parent getSet and multi-parent getSets waves.
+ *
+ * @param {import("../entities/set.js").Set} parentSet
+ * @param {Array<import("../entities/set.js").Set | import("../entities/item.js").Item>} elements
+ * @param {(el: any) => void} addSet
+ */
+export function ingestChildren(parentSet, elements, addSet) {
+  const space = this.spaces[parentSet.collection()];
+  const list = Array.isArray(elements) ? elements : [];
 
-  const space = this.spaces[set.collection()];
-  const elements = await this.network.getSet(set.collection(), set.hash());
-
-  for (const element of elements) {
+  for (const element of list) {
     if (!this.addLocation(space, element)) {
       this.monitoring.send(
         new Monitoring(this.level + 1, State.Filtered, element)
@@ -25,6 +27,17 @@ export async function getSet(set, addSet) {
   }
 }
 
+export async function getSet(set, addSet) {
+  if (set instanceof Item) {
+    addSet(set);
+    this.monitoring.send(new Monitoring(this.level + 1, State.Indexed, set));
+    return;
+  }
+
+  const elements = await this.network.getSet(set.collection(), set.hash());
+  ingestChildren.call(this, set, elements, addSet);
+}
+
 export function addLocation(space, element) {
   const location = [];
   const distances = [];
@@ -37,7 +50,6 @@ export function addLocation(space, element) {
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
     location.push(segment);
-
     const dimension = space.dimension(i);
     const origin = this.options.origins[dimension.name()];
     const filter = this.options.filters[dimension.name()];

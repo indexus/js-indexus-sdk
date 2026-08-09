@@ -2,10 +2,20 @@ import { Set } from "../entities/set.js";
 import { createStreamCoalescer } from "./streamCoalescer.js";
 import { createArrayPool, createSetPool } from "../utilities/bufferPool.js";
 import { createGpuOverlapAccelerator } from "../utilities/gpuOverlap.js";
-import { ROOT, zoneKey } from "../utilities/encoding.js";
+import { ROOT } from "../utilities/encoding.js";
+import { putLru, touchLru } from "../utilities/lru.js";
 
 import { project, refresh, consolidate, process, reconcileVisible } from "./layer.js";
 
+/**
+ * Aggregate drill engine.
+ *
+ * Two LRU caches sit on the Aggregate path and must not be confused:
+ * - `network._cache` — raw `/sets` children keyed by zoneKey (wire shape).
+ * - `grid.cache` — geometry-enriched processed children for the drill.
+ *
+ * The Network and Grid caches deliberately keep different shapes.
+ */
 class Grid {
   constructor(collection, space, options, stream, finish, monitoring, network) {
     this.collection = collection;
@@ -53,28 +63,34 @@ class Grid {
       ? Math.max(0, Math.floor(streamOptions.flushMs))
       : defaultFlushMs;
 
-    this.stream = createStreamCoalescer({
-      minBatch,
-      flushMs,
-      applyBatch: (elements) => this.streamOutput(elements),
-    });
+    // Progressive Aggregate wants every processed zone immediately. Avoid
+    // allocating a second buffer/timer only to flush it on the next line in
+    // process(); the worker remains the single ingest owner.
+    this.stream = streamProgressive
+      ? {
+          enqueue: (elements) => this.streamOutput(elements),
+          flushNow() {},
+        }
+      : createStreamCoalescer({
+          minBatch,
+          flushMs,
+          applyBatch: (elements) => this.streamOutput(elements),
+        });
   }
 
   /**
+   * himo.place drill: floor depth, fire-and-forget refresh so MOVE returns
+   * immediately while the tree walk streams into the cube.
+   *
    * @param {number} zoom
    * @param {any} bounds
    * @param {{ force?: boolean }} [opts] — force=true re-drills even if the
-   *   viewport hash is unchanged (needed after reconcile replaceBranch).
+   *   viewport hash is unchanged (manual Refresh / reconcile replaceBranch).
    */
   async move(zoom, bounds, opts = {}) {
-    // Hash precision must cover cube.display's xyz LOD (zoom+resolution).
-    // ceil avoids short-drilling (e.g. xyz target 11 → need 4 chars, not 3).
-    const targetXyz = Math.floor(
-      zoom + this.options.resolution + this.options.offset.zoom
-    );
-    const depth = Math.max(
-      0,
-      Math.ceil(targetXyz / Math.max(1, this.space.step))
+    const depth = Math.floor(
+      (zoom + this.options.resolution + this.options.offset.zoom) /
+        Math.max(1, this.space.step)
     );
     const hash = this.space.encode(this.space.center(bounds), depth);
 
@@ -87,27 +103,21 @@ class Grid {
     const id = crypto.randomUUID();
     this.current = { hash, id };
 
-    await this.refresh(id, [this.root], this.project(zoom, bounds), depth);
+    // Do not await — interactive pans cancel via current.id; finish() runs
+    // when this wave completes (same as himo.place).
+    void this.refresh(id, [this.root], this.project(zoom, bounds), depth);
   }
 
   getGeometry(location) {
-    if (this.geometryCache.has(location)) {
-      const cached = this.geometryCache.get(location);
-      this.geometryCache.delete(location);
-      this.geometryCache.set(location, cached);
-      return cached;
-    }
+    const cached = touchLru(this.geometryCache, location);
+    if (cached !== undefined) return cached;
 
     const geometry = {
       bounds: this.space.decode(location),
       xyz: this.space.xyz(location),
     };
 
-    if (this.geometryCache.size >= this.geometryCacheSize) {
-      const firstKey = this.geometryCache.keys().next().value;
-      this.geometryCache.delete(firstKey);
-    }
-    this.geometryCache.set(location, geometry);
+    putLru(this.geometryCache, location, geometry, this.geometryCacheSize);
     return geometry;
   }
 
@@ -116,11 +126,7 @@ class Grid {
    * @param {string} key
    */
   getProcessed(key) {
-    if (!this.cache.has(key)) return undefined;
-    const cached = this.cache.get(key);
-    this.cache.delete(key);
-    this.cache.set(key, cached);
-    return cached;
+    return touchLru(this.cache, key);
   }
 
   /**
@@ -128,21 +134,9 @@ class Grid {
    * @param {any[]} elements
    */
   putProcessed(key, elements) {
-    if (!this.cache.has(key) && this.cache.size >= this.cacheSize) {
-      this.cache.delete(this.cache.keys().next().value);
-    }
-    this.cache.set(key, elements);
+    putLru(this.cache, key, elements, this.cacheSize);
   }
 
-  /**
-   * Drop the processed-children cache entry for one zone.
-   * @param {string} collection
-   * @param {string} location
-   */
-  invalidate(collection, location) {
-    if (collection == null || location == null) return;
-    this.cache.delete(zoneKey(collection, location));
-  }
 }
 
 Grid.prototype.project = project;

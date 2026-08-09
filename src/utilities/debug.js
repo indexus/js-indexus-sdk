@@ -6,18 +6,25 @@
  * number can be traced to the step that produced it: what the wire carried,
  * what survived decoding, and what the refresh pass actually changed.
  *
- * Off by default. Enable from the console or from INIT:
+ * Off by default. Enable from the console (main thread) or from INIT:
  *
- *   __INDEXUS_DEBUG__ = true            // every channel
- *   __INDEXUS_DEBUG__ = "sets,refresh"  // pick channels
+ *   __INDEXUS_DEBUG__ = true                 // every channel
+ *   __INDEXUS_DEBUG__ = "sets,refresh,reconcile"
+ *
+ * In a Web Worker the main-thread global is a different realm. Aggregate
+ * passes `debugSdk` on INIT, and the worker mirrors each line back to the
+ * page console via `setDebugSink` → `DEBUG_LOG`.
  */
 
-/** @typedef {"sets" | "refresh" | "cube"} Channel */
+/** @typedef {"sets" | "refresh" | "cube" | "reconcile"} Channel */
 
-const CHANNELS = ["sets", "refresh", "cube"];
+const CHANNELS = ["sets", "refresh", "cube", "reconcile"];
 
 /** @type {Set<string> | null} — null means "not configured, read the global". */
 let enabled = null;
+
+/** @type {null | ((channel: string, event: string, fields?: object) => void)} */
+let sink = null;
 
 function fromGlobal() {
   const raw = globalThis.__INDEXUS_DEBUG__;
@@ -47,6 +54,15 @@ export function setDebug(config) {
 }
 
 /**
+ * Optional fan-out used by the Aggregate worker to mirror lines into the
+ * page DevTools console (worker `console` is a separate realm).
+ * @param {null | ((channel: string, event: string, fields?: object) => void)} fn
+ */
+export function setDebugSink(fn) {
+  sink = typeof fn === "function" ? fn : null;
+}
+
+/**
  * @param {Channel} channel
  * @returns {boolean}
  */
@@ -64,11 +80,21 @@ export function debugEnabled(channel) {
  */
 export function debugLog(channel, event, fields) {
   if (!debugEnabled(channel)) return;
-  if (fields === undefined) {
-    console.info(`[indexus:${channel}] ${event}`);
+  // When a sink mirrors into the page console (Aggregate worker → DEBUG_LOG),
+  // skip the local console — otherwise every line appears twice in DevTools.
+  if (sink) {
+    try {
+      sink(channel, event, fields);
+    } catch {
+      /* never let diagnostics break a read */
+    }
     return;
   }
-  console.info(`[indexus:${channel}] ${event}`, fields);
+  if (fields === undefined) {
+    console.info(`[indexus:${channel}] ${event}`);
+  } else {
+    console.info(`[indexus:${channel}] ${event}`, fields);
+  }
 }
 
 /** Signed number, so a delta reads as a delta rather than as a value. */

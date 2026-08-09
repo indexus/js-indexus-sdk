@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 
 import {
   abelianCount,
+  abelianCountEqual,
   abelianEqual,
   abelianMetrics,
   abelianSubtract,
@@ -76,6 +77,34 @@ describe("abelianEqual", () => {
   it("treats nullish as unequal unless both nullish", () => {
     assert.equal(abelianEqual(null, null), true);
     assert.equal(abelianEqual(null, { count: 0, metrics: [] }), false);
+  });
+});
+
+describe("abelianCountEqual", () => {
+  it("ignores metrics that differ", () => {
+    assert.equal(
+      abelianCountEqual(
+        { count: 554187, metrics: [1_234_567.89] },
+        { count: 554187, metrics: [1_234_570.11] }
+      ),
+      true
+    );
+  });
+
+  it("rejects count mismatch", () => {
+    assert.equal(
+      abelianCountEqual({ count: 3, metrics: [] }, { count: 4, metrics: [] }),
+      false
+    );
+  });
+
+  it("reads Set-style _count", () => {
+    assert.equal(abelianCountEqual({ _count: 2 }, new Set("col", "AB", 2, [9])), true);
+  });
+
+  it("treats nullish as unequal unless both nullish", () => {
+    assert.equal(abelianCountEqual(null, null), true);
+    assert.equal(abelianCountEqual(null, { count: 0 }), false);
   });
 });
 

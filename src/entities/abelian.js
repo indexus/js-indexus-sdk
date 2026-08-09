@@ -50,6 +50,20 @@ export function abelianEqual(a, b, eps = 1e-9) {
 }
 
 /**
+ * Count-only comparison, for deciding whether a zone drifted.
+ *
+ * A metric cannot move without an item entering or leaving a set, so the count
+ * already reports every real change — and it is an exact integer. The metrics
+ * are floats the local tree folded in a different child order than the node
+ * did, so they differ in the low bits on essentially every zone: comparing them
+ * declared the whole tree dirty on each pass.
+ */
+export function abelianCountEqual(a, b) {
+  if (a == null || b == null) return a === b;
+  return abelianCount(a) === abelianCount(b);
+}
+
+/**
  * Fold `delta` into `target` position by position, in place.
  *
  * Nothing forces a collection to hold items of one metric width, so a narrower
